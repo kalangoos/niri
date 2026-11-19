@@ -932,6 +932,14 @@ impl State {
         server.send_event(event);
     }
 
+    /// KalangoOS: a window drag moved (`id`) or ended (`None`); not part of the replicated state.
+    pub fn ipc_window_drag(&mut self, id: Option<u64>, pos: smithay::utils::Point<f64, smithay::utils::Logical>) {
+        let Some(server) = &self.niri.ipc_server else {
+            return;
+        };
+        server.send_event(Event::WindowDragChanged { id, x: pos.x, y: pos.y });
+    }
+
     pub fn ipc_screenshot_taken(&mut self, path: Option<String>) {
         let Some(server) = &self.niri.ipc_server else {
             return;

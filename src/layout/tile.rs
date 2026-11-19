@@ -9,6 +9,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
 
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
+use super::monitor::SnapFrac;
 use super::opening_window::{OpenAnimation, OpeningWindowRenderElement};
 use super::shadow::Shadow;
 use super::{
@@ -98,6 +99,15 @@ pub struct Tile<W: LayoutElement> {
 
     /// Offset during the initial interactive move rubberband.
     pub(super) interactive_move_offset: Point<f64, Logical>,
+
+    /// Region this floating window is snapped to (KalangoOS window snapping).
+    pub(super) snapped: Option<SnapFrac>,
+
+    /// Window size before it was snapped; restored when it is dragged out or un-snapped.
+    pub(super) unsnapped_size: Option<Size<i32, Logical>>,
+
+    /// Floating position before it was snapped (restored by un-snapping from the keyboard).
+    pub(super) unsnapped_pos: Option<Point<f64, SizeFrac>>,
 
     /// Snapshot of the last render for use in the close animation.
     unmap_snapshot: Option<TileRenderSnapshot>,
@@ -206,6 +216,9 @@ impl<W: LayoutElement> Tile<W> {
             move_y_animation: None,
             alpha_animation: None,
             interactive_move_offset: Point::from((0., 0.)),
+            snapped: None,
+            unsnapped_size: None,
+            unsnapped_pos: None,
             unmap_snapshot: None,
             rounded_corner_damage: Default::default(),
             view_size,

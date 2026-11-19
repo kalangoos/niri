@@ -113,6 +113,23 @@ impl<D: SeatHandler> PointerOrTouchStartData<D> {
 }
 
 impl State {
+    /// KalangoOS: the nested session window lost focus. Keys still held in niri's state would stay
+    /// pressed forever (their releases go to another window), e.g. Alt after an Alt+shortcut or
+    /// Alt+Tab on the host: typing then turns into shortcuts and clicks into Alt+drag. Release them.
+    pub fn release_all_keys(&mut self) {
+        let Some(keyboard) = self.niri.seat.get_keyboard() else {
+            return;
+        };
+        let time = crate::utils::get_monotonic_time().as_millis() as u32;
+        for key in keyboard.pressed_keys() {
+            let serial = SERIAL_COUNTER.next_serial();
+            keyboard.input::<(), _>(self, key, KeyState::Released, serial, time, |_, _, _| {
+                FilterResult::Forward
+            });
+        }
+        self.niri.suppressed_keys.clear();
+    }
+
     pub fn process_input_event<I: InputBackend + 'static>(&mut self, event: InputEvent<I>)
     where
         I::Device: 'static, // Needed for downcasting.
@@ -1981,6 +1998,21 @@ impl State {
                     self.niri.queue_redraw_all();
                 } else {
                     self.niri.layout.set_window_width(None, change);
+                }
+            }
+            Action::SetSnapTargets(targets) => {
+                self.niri.layout.set_snap_targets(&targets);
+                self.niri.queue_redraw_all();
+            }
+            Action::SnapWindow(region) => {
+                self.niri.layout.snap_window(None, &region);
+                self.maybe_warp_cursor_to_focus();
+            }
+            Action::SnapWindowById { id, region } => {
+                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    self.niri.layout.snap_window(Some(&window), &region);
                 }
             }
             Action::SetWindowWidthById { id, change } => {

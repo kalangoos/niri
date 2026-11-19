@@ -488,6 +488,10 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                         };
                         println!("Config loaded {status}");
                     }
+                    Event::WindowDragChanged { id, x, y } => match id {
+                        Some(id) => println!("Window {id} dragged at {x:.0}, {y:.0}"),
+                        None => println!("Window drag ended at {x:.0}, {y:.0}"),
+                    },
                     Event::ScreenshotCaptured { path } => {
                         let mut parts = vec![];
                         parts.push("copied to clipboard".to_string());

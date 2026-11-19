@@ -18,6 +18,7 @@ use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
+use super::monitor::SnapFrac;
 use super::scrolling::{
     Column, ColumnWidth, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
 };
@@ -1865,7 +1866,81 @@ impl<W: LayoutElement> Workspace<W> {
         &self,
         position: InsertPosition,
     ) -> Option<Rectangle<f64, Logical>> {
+        if let InsertPosition::Snap(frac) = position {
+            return Some(self.snap_rect(frac));
+        }
         self.scrolling.insert_hint_area(position)
+    }
+
+    /// Snaps a window (or the active one) from the keyboard or IPC (KalangoOS window snapping).
+    ///
+    /// `region`: "left", "right", "up", "down" step like Super+arrows on other desktops (left half →
+    /// top-left quarter with up, back with down, the opposite side restores); "restore"; a named region
+    /// ("maximize", "left-half", "top-left"…) or "x,y,w,h" in thousandths of the working area.
+    pub fn snap_window(&mut self, id: Option<&W::Id>, region: &str) {
+        let id = match id {
+            Some(id) => id.clone(),
+            None => match self.active_window() {
+                Some(w) => w.id().clone(),
+                None => return,
+            },
+        };
+        let current = self.tiles().find(|t| *t.window().id() == id).and_then(|t| t.snapped);
+        use SnapFrac as F;
+        // Some(Some(region)) = snap, Some(None) = restore, None = nothing to do
+        let target: Option<Option<SnapFrac>> = match region {
+            "left" => Some(match current {
+                Some(F::RIGHT) => None,
+                Some(F::TOP_RIGHT) => Some(F::TOP_LEFT),
+                Some(F::BOTTOM_RIGHT) => Some(F::BOTTOM_LEFT),
+                _ => Some(F::LEFT),
+            }),
+            "right" => Some(match current {
+                Some(F::LEFT) => None,
+                Some(F::TOP_LEFT) => Some(F::TOP_RIGHT),
+                Some(F::BOTTOM_LEFT) => Some(F::BOTTOM_RIGHT),
+                _ => Some(F::RIGHT),
+            }),
+            "up" => match current {
+                Some(F::LEFT) => Some(Some(F::TOP_LEFT)),
+                Some(F::RIGHT) => Some(Some(F::TOP_RIGHT)),
+                Some(F::BOTTOM_LEFT) => Some(Some(F::LEFT)),
+                Some(F::BOTTOM_RIGHT) => Some(Some(F::RIGHT)),
+                Some(F::MAXIMIZE) | Some(F::TOP_LEFT) | Some(F::TOP_RIGHT) => None,
+                _ => Some(Some(F::MAXIMIZE)),
+            },
+            "down" => match current {
+                Some(F::MAXIMIZE) => Some(None),
+                Some(F::LEFT) => Some(Some(F::BOTTOM_LEFT)),
+                Some(F::RIGHT) => Some(Some(F::BOTTOM_RIGHT)),
+                Some(F::TOP_LEFT) => Some(Some(F::LEFT)),
+                Some(F::TOP_RIGHT) => Some(Some(F::RIGHT)),
+                Some(_) => Some(None),
+                None => None,
+            },
+            "restore" => Some(None),
+            other => SnapFrac::parse(other).map(Some),
+        };
+        let Some(target) = target else { return };
+        match target {
+            Some(frac) => {
+                if !self.floating.has_window(&id) {
+                    self.set_window_floating(Some(&id), true);
+                }
+                let rect = self.snap_rect(frac);
+                self.floating.snap_window(&id, rect, frac, true);
+            }
+            None => {
+                if self.floating.has_window(&id) {
+                    self.floating.unsnap_window(&id, true);
+                }
+            }
+        }
+    }
+
+    /// Where a snapped window goes, in workspace coordinates (KalangoOS window snapping).
+    pub(super) fn snap_rect(&self, frac: SnapFrac) -> Rectangle<f64, Logical> {
+        frac.rect_in(self.working_area, self.options.layout.gaps)
     }
 
     pub fn view_offset_gesture_begin(&mut self, is_touchpad: bool) {

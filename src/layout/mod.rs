@@ -36,7 +36,7 @@ use std::mem;
 use std::rc::Rc;
 use std::time::Duration;
 
-use monitor::{InsertHint, InsertPosition, InsertWorkspace, MonitorAddWindowTarget};
+use monitor::{InsertHint, InsertPosition, InsertWorkspace, MonitorAddWindowTarget, SnapFrac};
 use niri_config::utils::MergeWith as _;
 use niri_config::{
     Config, CornerRadius, LayoutPart, PresetSize, Workspace as WorkspaceConfig, WorkspaceReference,
@@ -351,6 +351,8 @@ pub struct Layout<W: LayoutElement> {
     last_active_workspace_id: HashMap<String, WorkspaceId>,
     /// Ongoing interactive move.
     interactive_move: Option<InteractiveMoveState<W>>,
+    /// KalangoOS layout picker: drop targets of the current drag (output coordinates → region).
+    snap_targets: Vec<(Rectangle<f64, Logical>, SnapFrac)>,
     /// Ongoing drag-and-drop operation.
     dnd: Option<DndData<W>>,
     /// Clock for driving animations.
@@ -698,6 +700,7 @@ impl<W: LayoutElement> Layout<W> {
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
+            snap_targets: Vec::new(),
             dnd: None,
             clock,
             update_render_elements_time: Duration::ZERO,
@@ -723,6 +726,7 @@ impl<W: LayoutElement> Layout<W> {
             is_active: true,
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
+            snap_targets: Vec::new(),
             dnd: None,
             clock,
             update_render_elements_time: Duration::ZERO,
@@ -2854,6 +2858,7 @@ impl<W: LayoutElement> Layout<W> {
         }
 
         let _span = tracy_client::span!("Layout::update_insert_hint::update");
+        let targets = self.snap_targets.clone();
 
         if let Some(mon) = self.monitor_for_output_mut(&move_.output) {
             let zoom = mon.overview_zoom();
@@ -2867,7 +2872,16 @@ impl<W: LayoutElement> Layout<W> {
                         .unwrap();
                     let pos_within_workspace =
                         (move_.pointer_pos_within_output - geo.loc).downscale(zoom);
-                    let position = if move_.is_floating {
+                    let snap = (zoom >= 0.999)
+                        .then(|| {
+                            target_at(&targets, move_.pointer_pos_within_output).or_else(|| {
+                                snap_zone_at(pos_within_workspace, ws.view_size(), ws.working_area())
+                            })
+                        })
+                        .flatten();
+                    let position = if let Some(frac) = snap {
+                        InsertPosition::Snap(frac)
+                    } else if move_.is_floating {
                         InsertPosition::Floating
                     } else {
                         ws.scrolling_insert_position(pos_within_workspace)
@@ -3237,6 +3251,42 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         workspace.switch_focus_floating_tiling();
+    }
+
+    /// KalangoOS layout picker: where a dragged window can be dropped (see `Action::SetSnapTargets`).
+    pub fn set_snap_targets(&mut self, json: &str) {
+        self.snap_targets = serde_json::from_str::<Vec<serde_json::Value>>(json)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|t| {
+                let f = |k: &str| t.get(k).and_then(|v| v.as_f64());
+                let rect = Rectangle::new(Point::from((f("x")?, f("y")?)), Size::from((f("w")?, f("h")?)));
+                let frac = SnapFrac::parse(t.get("region")?.as_str()?)?;
+                Some((rect, frac))
+            })
+            .collect();
+    }
+
+    /// Whether a window is being dragged (past the start threshold).
+    pub fn interactive_move_is_moving(&self) -> bool {
+        matches!(self.interactive_move, Some(InteractiveMoveState::Moving(_)))
+    }
+
+    /// KalangoOS window snapping from the keyboard or IPC (see `Workspace::snap_window`).
+    pub fn snap_window(&mut self, window: Option<&W::Id>, region: &str) {
+        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+            if window.is_none() || window == Some(move_.tile.window().id()) {
+                return;
+            }
+        }
+        let workspace = if let Some(window) = window {
+            self.workspaces_mut().find(|ws| ws.has_window(window))
+        } else {
+            self.active_workspace_mut()
+        };
+        if let Some(ws) = workspace {
+            ws.snap_window(window, region);
+        }
     }
 
     pub fn move_floating_window(
@@ -3969,6 +4019,15 @@ impl<W: LayoutElement> Layout<W> {
 
                 tile.stop_move_animations();
                 tile.interactive_move_offset = Point::from((0., 0.));
+                // Dragged out of a snap region: back to the size it had before (the pointer keeps its
+                // relative place on the window).
+                if tile.snapped.take().is_some() {
+                    tile.unsnapped_pos = None;
+                    if let Some(size) = tile.unsnapped_size.take() {
+                        tile.floating_window_size = Some(size);
+                        tile.window_mut().request_size_once(size, true);
+                    }
+                }
                 tile.window().output_enter(&output);
                 tile.window().set_preferred_scale_transform(
                     output.current_scale(),
@@ -4152,6 +4211,8 @@ impl<W: LayoutElement> Layout<W> {
 
         // Dragging in the overview shouldn't switch the workspace and so on.
         let allow_to_activate_workspace = !self.overview_open;
+        // KalangoOS layout picker targets are only for this drag.
+        let targets = std::mem::take(&mut self.snap_targets);
 
         match &mut self.monitor_set {
             MonitorSet::Normal {
@@ -4172,11 +4233,28 @@ impl<W: LayoutElement> Layout<W> {
                                     .position(|ws| ws.id() == ws_id)
                                     .unwrap();
 
-                                let position = if move_.is_floating {
+                                let pos_within_workspace =
+                                    (move_.pointer_pos_within_output - geo.loc).downscale(zoom);
+                                let snap = {
+                                    let ws = &mon.workspaces[ws_idx];
+                                    (zoom >= 0.999)
+                                        .then(|| {
+                                            target_at(&targets, move_.pointer_pos_within_output)
+                                                .or_else(|| {
+                                                    snap_zone_at(
+                                                        pos_within_workspace,
+                                                        ws.view_size(),
+                                                        ws.working_area(),
+                                                    )
+                                                })
+                                        })
+                                        .flatten()
+                                };
+                                let position = if let Some(frac) = snap {
+                                    InsertPosition::Snap(frac)
+                                } else if move_.is_floating {
                                     InsertPosition::Floating
                                 } else {
-                                    let pos_within_workspace =
-                                        (move_.pointer_pos_within_output - geo.loc).downscale(zoom);
                                     let ws = &mut mon.workspaces[ws_idx];
                                     ws.scrolling_insert_position(pos_within_workspace)
                                 };
@@ -4259,6 +4337,36 @@ impl<W: LayoutElement> Layout<W> {
                             move_.tile,
                             true,
                             allow_to_activate_workspace,
+                        );
+                    }
+                    InsertPosition::Snap(frac) => {
+                        // KalangoOS window snapping: floating, with the size and position of the
+                        // region; the size before is kept to come back to.
+                        let mut tile = move_.tile;
+                        let ws = &mon.workspaces[ws_idx];
+                        let rect = ws.snap_rect(frac);
+                        if tile.snapped.is_none() {
+                            let win = tile.window();
+                            tile.unsnapped_size = Some(win.expected_size().unwrap_or_else(|| win.size()));
+                            tile.unsnapped_pos = None;
+                        }
+                        tile.snapped = Some(frac);
+                        tile.floating_pos = Some(ws.floating_logical_to_size_frac(rect.loc));
+                        let w = tile.window_width_for_tile_width(rect.size.w).round().max(1.) as i32;
+                        let h = tile.window_height_for_tile_height(rect.size.h).round().max(1.) as i32;
+                        tile.floating_window_size = Some(Size::from((w, h)));
+                        let ws_id = ws.id();
+                        mon.add_tile(
+                            tile,
+                            MonitorAddWindowTarget::Workspace {
+                                id: ws_id,
+                                column_idx: None,
+                            },
+                            ActivateWindow::Yes,
+                            allow_to_activate_workspace,
+                            move_.width,
+                            move_.is_full_width,
+                            true,
                         );
                     }
                     InsertPosition::Floating => {
@@ -5019,5 +5127,74 @@ fn compute_overview_zoom(options: &Options, overview_progress: Option<f64>) -> f
         (1. - p * (1. - zoom)).max(0.0001)
     } else {
         1.
+    }
+}
+
+/// KalangoOS layout picker: the region of the drop target under the pointer (output coordinates).
+fn target_at(targets: &[(Rectangle<f64, Logical>, SnapFrac)], pos: Point<f64, Logical>) -> Option<SnapFrac> {
+    targets.iter().find(|(r, _)| r.contains(pos)).map(|(_, f)| *f)
+}
+
+/// KalangoOS window snapping: the region under the pointer while a window is dragged, when the
+/// pointer is at a screen edge (halves, maximize at the top) or near a corner (quarters). `pos` and
+/// `view` are in workspace coordinates; the top bar counts as the top edge.
+fn snap_zone_at(
+    pos: Point<f64, Logical>,
+    view: Size<f64, Logical>,
+    area: Rectangle<f64, Logical>,
+) -> Option<SnapFrac> {
+    const EDGE: f64 = 6.;
+    let corner = (view.w.min(view.h) * 0.12).max(64.);
+    let left = pos.x <= EDGE;
+    let right = pos.x >= view.w - EDGE;
+    let top = pos.y <= area.loc.y + EDGE;
+    let bottom = pos.y >= view.h - EDGE;
+    let near_top = pos.y <= area.loc.y + corner;
+    let near_bottom = pos.y >= area.loc.y + area.size.h - corner;
+    let near_left = pos.x <= corner;
+    let near_right = pos.x >= view.w - corner;
+    Some(if (left && near_top) || (top && near_left) {
+        SnapFrac::TOP_LEFT
+    } else if (right && near_top) || (top && near_right) {
+        SnapFrac::TOP_RIGHT
+    } else if (left && near_bottom) || (bottom && near_left) {
+        SnapFrac::BOTTOM_LEFT
+    } else if (right && near_bottom) || (bottom && near_right) {
+        SnapFrac::BOTTOM_RIGHT
+    } else if left {
+        SnapFrac::LEFT
+    } else if right {
+        SnapFrac::RIGHT
+    } else if top {
+        SnapFrac::MAXIMIZE
+    } else {
+        return None;
+    })
+}
+
+#[cfg(test)]
+mod kalango_snap_tests {
+    use super::*;
+
+    #[test]
+    fn edges_and_corners_pick_halves_quarters_and_maximize() {
+        let view = Size::from((1920., 1080.));
+        let area = Rectangle::new(Point::from((0., 32.)), Size::from((1920., 960.)));
+        let at = |x: f64, y: f64| snap_zone_at(Point::from((x, y)), view, area);
+        assert_eq!(at(0., 540.), Some(SnapFrac::LEFT));
+        assert_eq!(at(1919., 540.), Some(SnapFrac::RIGHT));
+        assert_eq!(at(960., 10.), Some(SnapFrac::MAXIMIZE));
+        assert_eq!(at(0., 60.), Some(SnapFrac::TOP_LEFT));
+        assert_eq!(at(1919., 1000.), Some(SnapFrac::BOTTOM_RIGHT));
+        assert_eq!(at(30., 1079.), Some(SnapFrac::BOTTOM_LEFT));
+        assert_eq!(at(960., 540.), None);
+        assert_eq!(at(960., 1079.), None);
+        // regions: halves meet with half a gap each side
+        let l = SnapFrac::LEFT.rect_in(area, 12.);
+        let r = SnapFrac::RIGHT.rect_in(area, 12.);
+        assert_eq!((l.loc.x, l.loc.y, l.size.w, l.size.h), (12., 44., 942., 936.));
+        assert_eq!(r.loc.x - (l.loc.x + l.size.w), 12.);
+        assert_eq!(SnapFrac::parse("0,0,333,1000"), Some(SnapFrac::new(0, 0, 333, 1000)));
+        assert_eq!(SnapFrac::parse("900,0,200,1000"), None);
     }
 }

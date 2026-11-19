@@ -8,6 +8,7 @@ use niri_ipc::{PositionChange, SizeChange, WindowLayout};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
 
+use super::monitor::SnapFrac;
 use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
 use super::scrolling::ColumnWidth;
 use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
@@ -1221,6 +1222,48 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
     pub fn logical_to_size_frac(&self, logical_pos: Point<f64, Logical>) -> Point<f64, SizeFrac> {
         Data::logical_to_size_frac_in_working_area(self.working_area, logical_pos)
+    }
+
+    /// Puts a floating window into a snap region (KalangoOS window snapping): size and position of
+    /// `rect`, remembering the size and position to come back to.
+    pub fn snap_window(&mut self, id: &W::Id, rect: Rectangle<f64, Logical>, frac: SnapFrac, animate: bool) {
+        let Some(idx) = self.idx_of(id) else { return };
+        let pos_frac = self.logical_to_size_frac(self.data[idx].logical_pos);
+        let tile = &mut self.tiles[idx];
+        if tile.snapped.is_none() {
+            let win = tile.window();
+            tile.unsnapped_size = Some(win.expected_size().unwrap_or_else(|| win.size()));
+            tile.unsnapped_pos = Some(pos_frac);
+        }
+        tile.snapped = Some(frac);
+        tile.floating_preset_width_idx = None;
+        tile.floating_preset_height_idx = None;
+        let w = tile.window_width_for_tile_width(rect.size.w).round().max(1.) as i32;
+        let h = tile.window_height_for_tile_height(rect.size.h).round().max(1.) as i32;
+        let win = tile.window_mut();
+        let (min, max) = (win.min_size(), win.max_size());
+        let size = Size::from((ensure_min_max_size(w, min.w, max.w), ensure_min_max_size(h, min.h, max.h)));
+        win.request_size_once(size, animate);
+        tile.floating_window_size = Some(size);
+        self.move_and_animate(idx, rect.loc);
+    }
+
+    /// Back to the size and position from before the snap. Returns false if it was not snapped.
+    pub fn unsnap_window(&mut self, id: &W::Id, animate: bool) -> bool {
+        let Some(idx) = self.idx_of(id) else { return false };
+        let tile = &mut self.tiles[idx];
+        if tile.snapped.take().is_none() {
+            return false;
+        }
+        if let Some(size) = tile.unsnapped_size.take() {
+            tile.window_mut().request_size_once(size, animate);
+            tile.floating_window_size = Some(size);
+        }
+        if let Some(pos) = tile.unsnapped_pos.take() {
+            let pos = self.scale_by_working_area(pos);
+            self.move_and_animate(idx, pos);
+        }
+        true
     }
 
     fn move_and_animate(&mut self, idx: usize, new_pos: Point<f64, Logical>) {

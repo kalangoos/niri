@@ -289,6 +289,14 @@ pub enum Action {
     MoveColumnToMonitorNext,
     MoveColumnToMonitor(#[knuffel(argument)] String),
     SetWindowWidth(#[knuffel(argument, str)] SizeChange),
+    SnapWindow(#[knuffel(argument)] String),
+    #[knuffel(skip)]
+    SetSnapTargets(String),
+    #[knuffel(skip)]
+    SnapWindowById {
+        id: u64,
+        region: String,
+    },
     #[knuffel(skip)]
     SetWindowWidthById {
         id: u64,
@@ -584,6 +592,12 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::MoveColumnToMonitorNext {} => Self::MoveColumnToMonitorNext,
             niri_ipc::Action::MoveColumnToMonitor { output } => Self::MoveColumnToMonitor(output),
             niri_ipc::Action::SetWindowWidth { id: None, change } => Self::SetWindowWidth(change),
+            niri_ipc::Action::SnapWindow { id: None, region } => Self::SnapWindow(region),
+            niri_ipc::Action::SetSnapTargets { targets } => Self::SetSnapTargets(targets),
+            niri_ipc::Action::SnapWindow {
+                id: Some(id),
+                region,
+            } => Self::SnapWindowById { id, region },
             niri_ipc::Action::SetWindowWidth {
                 id: Some(id),
                 change,

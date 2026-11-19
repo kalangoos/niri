@@ -131,6 +131,79 @@ pub(super) enum InsertPosition {
     NewColumn(usize),
     InColumn(usize, usize),
     Floating,
+    /// KalangoOS window snapping: the window goes floating into this region of the working area.
+    Snap(SnapFrac),
+}
+
+/// A region of the working area in thousandths: x, y, width, height (KalangoOS window snapping).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapFrac {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+impl SnapFrac {
+    pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
+        Self { x, y, w, h }
+    }
+    pub const MAXIMIZE: Self = Self::new(0, 0, 1000, 1000);
+    pub const LEFT: Self = Self::new(0, 0, 500, 1000);
+    pub const RIGHT: Self = Self::new(500, 0, 500, 1000);
+    pub const TOP: Self = Self::new(0, 0, 1000, 500);
+    pub const BOTTOM: Self = Self::new(0, 500, 1000, 500);
+    pub const TOP_LEFT: Self = Self::new(0, 0, 500, 500);
+    pub const TOP_RIGHT: Self = Self::new(500, 0, 500, 500);
+    pub const BOTTOM_LEFT: Self = Self::new(0, 500, 500, 500);
+    pub const BOTTOM_RIGHT: Self = Self::new(500, 500, 500, 500);
+
+    /// A named region ("left", "top-right", "maximize"…) or "x,y,w,h" in thousandths.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "maximize" | "maximizar" => Self::MAXIMIZE,
+            "left-half" | "metade-esquerda" => Self::LEFT,
+            "right-half" | "metade-direita" => Self::RIGHT,
+            "top-half" => Self::TOP,
+            "bottom-half" => Self::BOTTOM,
+            "top-left" => Self::TOP_LEFT,
+            "top-right" => Self::TOP_RIGHT,
+            "bottom-left" => Self::BOTTOM_LEFT,
+            "bottom-right" => Self::BOTTOM_RIGHT,
+            "left-third" => Self::new(0, 0, 333, 1000),
+            "center-third" => Self::new(333, 0, 334, 1000),
+            "right-third" => Self::new(667, 0, 333, 1000),
+            "left-two-thirds" => Self::new(0, 0, 667, 1000),
+            "right-two-thirds" => Self::new(333, 0, 667, 1000),
+            _ => {
+                let v: Vec<u16> = s.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
+                let [x, y, w, h] = v[..] else { return None };
+                if w == 0 || h == 0 || x + w > 1000 || y + h > 1000 {
+                    return None;
+                }
+                Self::new(x, y, w, h)
+            }
+        })
+    }
+
+    /// The region in a working area, with the layout gap around it (half a gap between regions).
+    pub fn rect_in(
+        &self,
+        area: Rectangle<f64, Logical>,
+        gap: f64,
+    ) -> Rectangle<f64, Logical> {
+        let f = |v: u16| f64::from(v) / 1000.;
+        let x0 = area.loc.x + area.size.w * f(self.x);
+        let y0 = area.loc.y + area.size.h * f(self.y);
+        let x1 = area.loc.x + area.size.w * f(self.x + self.w);
+        let y1 = area.loc.y + area.size.h * f(self.y + self.h);
+        let inset = |edge: bool| if edge { gap } else { gap / 2. };
+        let l = x0 + inset(self.x == 0);
+        let t = y0 + inset(self.y == 0);
+        let r = x1 - inset(self.x + self.w >= 1000);
+        let b = y1 - inset(self.y + self.h >= 1000);
+        Rectangle::new(Point::from((l, t)), Size::from(((r - l).max(1.), (b - t).max(1.))))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

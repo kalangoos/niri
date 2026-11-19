@@ -683,6 +683,32 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(allow_hyphen_values = true))]
         change: SizeChange,
     },
+    /// Set the drop targets of a window drag (KalangoOS layout picker).
+    #[cfg_attr(feature = "clap", clap(about = "Set the drop targets of a window drag"))]
+    SetSnapTargets {
+        /// JSON list of targets: `[{"x": .., "y": .., "w": .., "h": .., "region": "x,y,w,h"}]`, the
+        /// rectangle in output logical pixels and the region in thousandths of the working area.
+        /// An empty list removes them; they are removed when the drag ends.
+        targets: String,
+    },
+    /// Snap a window to a region of the screen (KalangoOS).
+    #[cfg_attr(
+        feature = "clap",
+        clap(about = "Snap the focused window to a region of the screen")
+    )]
+    SnapWindow {
+        /// Id of the window to snap.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+
+        /// Region: left, right, up, down (steps like Super+arrows), restore, maximize, left-half,
+        /// right-half, top-left, top-right, bottom-left, bottom-right, left-third, center-third,
+        /// right-third, left-two-thirds, right-two-thirds, or "x,y,w,h" in thousandths of the
+        /// working area.
+        region: String,
+    },
     /// Change the height of a window.
     #[cfg_attr(
         feature = "clap",
@@ -1678,6 +1704,16 @@ pub enum Event {
         ///
         /// For example, the config file couldn't be parsed.
         failed: bool,
+    },
+    /// A window is being dragged (KalangoOS: the shell shows the layout picker). `id` is `None` when
+    /// the drag ended; `x`, `y` are the pointer within the output, in logical pixels.
+    WindowDragChanged {
+        /// Id of the dragged window, or `None` when the drag ended.
+        id: Option<u64>,
+        /// Pointer x within the output.
+        x: f64,
+        /// Pointer y within the output.
+        y: f64,
     },
     /// A screenshot was captured.
     ScreenshotCaptured {

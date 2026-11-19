@@ -79,6 +79,10 @@ impl MoveGrab {
     }
 
     fn on_ungrab(&mut self, data: &mut State) {
+        if self.gesture == GestureState::Move {
+            let pos = data.niri.output_under(self.last_location).map(|(_, p)| p).unwrap_or_default();
+            data.ipc_window_drag(None, pos);
+        }
         let layout = &mut data.niri.layout;
         match self.gesture {
             GestureState::Recognizing => {
@@ -234,6 +238,11 @@ impl MoveGrab {
                     output,
                     pos_within_output,
                 );
+                if ongoing && data.niri.layout.interactive_move_is_moving() {
+                    // KalangoOS: the shell follows the drag (layout picker near the top bar)
+                    let id = data.niri.layout.windows().find(|(_, m)| m.window == self.window).map(|(_, m)| m.id().get());
+                    data.ipc_window_drag(id, pos_within_output);
+                }
                 if ongoing {
                     // FIXME: only redraw the previous and the new output.
                     data.niri.queue_redraw_all();

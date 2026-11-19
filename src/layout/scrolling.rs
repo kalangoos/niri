@@ -2516,7 +2516,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 let loc = Point::from((self.column_x(column_index) + origin_x, y));
                 Rectangle::new(loc, size)
             }
-            InsertPosition::Floating => return None,
+            InsertPosition::Floating | InsertPosition::Snap(_) => return None,
         };
 
         // First window on an empty workspace will cancel out any view offset. Replicate this

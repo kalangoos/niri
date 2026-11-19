@@ -130,7 +130,9 @@ impl Winit {
                     state.niri.output_resized(&winit.output);
                 }
                 WinitEvent::Input(event) => state.process_input_event(event),
-                WinitEvent::Focus(_) => (),
+                // KalangoOS: release keys held when the window lost focus (stuck Alt).
+                WinitEvent::Focus(false) => state.release_all_keys(),
+                WinitEvent::Focus(true) => (),
                 WinitEvent::Redraw => state.niri.queue_redraw(&state.backend.winit().output),
                 WinitEvent::CloseRequested => state.niri.stop_signal.stop(),
             })
