@@ -353,6 +353,8 @@ pub struct Layout<W: LayoutElement> {
     interactive_move: Option<InteractiveMoveState<W>>,
     /// KalangoOS layout picker: drop targets of the current drag (output coordinates → region).
     snap_targets: Vec<(Rectangle<f64, Logical>, SnapFrac)>,
+    /// KalangoOS: dragging a window to a screen edge or corner snaps it (Settings can turn it off).
+    edge_snap: bool,
     /// Ongoing drag-and-drop operation.
     dnd: Option<DndData<W>>,
     /// Clock for driving animations.
@@ -701,6 +703,7 @@ impl<W: LayoutElement> Layout<W> {
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
             snap_targets: Vec::new(),
+            edge_snap: true,
             dnd: None,
             clock,
             update_render_elements_time: Duration::ZERO,
@@ -727,6 +730,7 @@ impl<W: LayoutElement> Layout<W> {
             last_active_workspace_id: HashMap::new(),
             interactive_move: None,
             snap_targets: Vec::new(),
+            edge_snap: true,
             dnd: None,
             clock,
             update_render_elements_time: Duration::ZERO,
@@ -2859,6 +2863,7 @@ impl<W: LayoutElement> Layout<W> {
 
         let _span = tracy_client::span!("Layout::update_insert_hint::update");
         let targets = self.snap_targets.clone();
+        let edge_snap = self.edge_snap;
 
         if let Some(mon) = self.monitor_for_output_mut(&move_.output) {
             let zoom = mon.overview_zoom();
@@ -2875,7 +2880,9 @@ impl<W: LayoutElement> Layout<W> {
                     let snap = (zoom >= 0.999)
                         .then(|| {
                             target_at(&targets, move_.pointer_pos_within_output).or_else(|| {
-                                snap_zone_at(pos_within_workspace, ws.view_size(), ws.working_area())
+                                edge_snap
+                                    .then(|| snap_zone_at(pos_within_workspace, ws.view_size(), ws.working_area()))
+                                    .flatten()
                             })
                         })
                         .flatten();
@@ -3251,6 +3258,11 @@ impl<W: LayoutElement> Layout<W> {
             return;
         };
         workspace.switch_focus_floating_tiling();
+    }
+
+    /// KalangoOS: whether dragging a window to a screen edge or corner snaps it.
+    pub fn set_edge_snap(&mut self, on: bool) {
+        self.edge_snap = on;
     }
 
     /// KalangoOS layout picker: where a dragged window can be dropped (see `Action::SetSnapTargets`).
@@ -4213,6 +4225,7 @@ impl<W: LayoutElement> Layout<W> {
         let allow_to_activate_workspace = !self.overview_open;
         // KalangoOS layout picker targets are only for this drag.
         let targets = std::mem::take(&mut self.snap_targets);
+        let edge_snap = self.edge_snap;
 
         match &mut self.monitor_set {
             MonitorSet::Normal {
@@ -4241,11 +4254,15 @@ impl<W: LayoutElement> Layout<W> {
                                         .then(|| {
                                             target_at(&targets, move_.pointer_pos_within_output)
                                                 .or_else(|| {
-                                                    snap_zone_at(
-                                                        pos_within_workspace,
-                                                        ws.view_size(),
-                                                        ws.working_area(),
-                                                    )
+                                                    edge_snap
+                                                        .then(|| {
+                                                            snap_zone_at(
+                                                                pos_within_workspace,
+                                                                ws.view_size(),
+                                                                ws.working_area(),
+                                                            )
+                                                        })
+                                                        .flatten()
                                                 })
                                         })
                                         .flatten()

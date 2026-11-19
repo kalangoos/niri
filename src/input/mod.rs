@@ -2075,6 +2075,9 @@ impl State {
                 self.niri.layout.set_snap_targets(&targets);
                 self.niri.queue_redraw_all();
             }
+            Action::SetEdgeSnap(on) => {
+                self.niri.layout.set_edge_snap(on);
+            }
             Action::SnapWindow(region) => {
                 self.niri.layout.snap_window(None, &region);
                 self.maybe_warp_cursor_to_focus();

@@ -691,6 +691,13 @@ pub enum Action {
         /// An empty list removes them; they are removed when the drag ends.
         targets: String,
     },
+    /// Whether dragging a window to a screen edge or corner snaps it (KalangoOS; on by default).
+    #[cfg_attr(feature = "clap", clap(about = "Turn snapping by dragging to the screen edges on or off"))]
+    SetEdgeSnap {
+        /// On or off.
+        #[cfg_attr(feature = "clap", arg(action = clap::ArgAction::Set))]
+        on: bool,
+    },
     /// Render a small picture of a window to a PNG file (KalangoOS window switcher). Unlike a
     /// screenshot it does not touch the clipboard and shows no notification.
     ThumbnailWindow {
