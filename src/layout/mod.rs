@@ -3285,6 +3285,22 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     /// KalangoOS window snapping from the keyboard or IPC (see `Workspace::snap_window`).
+    /// Minimizes a window (KalangoOS): it stays open, out of sight, until activated again.
+    pub fn minimize_window(&mut self, window: &W::Id) -> bool {
+        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+            if move_.tile.window().id() == window {
+                return false;
+            }
+        }
+        self.workspaces_mut()
+            .find(|ws| ws.has_window(window))
+            .is_some_and(|ws| ws.minimize_window(window))
+    }
+
+    pub fn is_minimized(&self, window: &W::Id) -> bool {
+        self.workspaces().any(|(_, _, ws)| ws.is_minimized(window))
+    }
+
     pub fn snap_window(&mut self, window: Option<&W::Id>, region: &str) {
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {

@@ -997,6 +997,38 @@ impl State {
         self.niri.queue_redraw_all();
     }
 
+    /// Minimizes a window (KalangoOS): it leaves with the close animation and stays open out of
+    /// sight; activating it again (focus-window, the dock, a taskbar, the app asking for focus)
+    /// brings it back.
+    pub fn minimize_window(&mut self, window: &Window) {
+        if self.niri.layout.is_minimized(window) {
+            return;
+        }
+        let output = self
+            .niri
+            .layout
+            .windows()
+            .find(|(_, m)| &m.window == window)
+            .and_then(|(mon, _)| mon.map(|mon| mon.output().clone()));
+
+        self.store_unmap_snapshot(window, output.as_ref());
+        let transaction = crate::utils::transaction::Transaction::new();
+        let blocker = transaction.blocker();
+        self.backend.with_primary_renderer(|renderer| {
+            self.niri
+                .layout
+                .start_close_animation_for_window(renderer, window, blocker);
+        });
+        drop(transaction);
+
+        if !self.niri.layout.minimize_window(window) {
+            self.niri.layout.clear_unmap_snapshot(window);
+        }
+        self.niri.layer_shell_on_demand_focus = None;
+        // FIXME: granular
+        self.niri.queue_redraw_all();
+    }
+
     pub fn confirm_mru(&mut self) {
         if let Some(window) = self.niri.close_mru(MruCloseRequest::Confirm) {
             self.focus_window(&window);
@@ -2266,7 +2298,8 @@ impl Niri {
         let compositor_state = CompositorState::new_v6::<State>(&display_handle);
         let xdg_shell_state = XdgShellState::new_with_capabilities::<State>(
             &display_handle,
-            [WmCapabilities::Fullscreen, WmCapabilities::Maximize],
+            // (KalangoOS: minimize too — GTK asks for it only when the compositor says it can)
+            [WmCapabilities::Fullscreen, WmCapabilities::Maximize, WmCapabilities::Minimize],
         );
         let xdg_decoration_state =
             XdgDecorationState::new_with_filter::<State, _>(&display_handle, |client| {

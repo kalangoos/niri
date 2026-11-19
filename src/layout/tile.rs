@@ -109,6 +109,13 @@ pub struct Tile<W: LayoutElement> {
     /// Floating position before it was snapped (restored by un-snapping from the keyboard).
     pub(super) unsnapped_pos: Option<Point<f64, SizeFrac>>,
 
+    /// Minimized (KalangoOS): kept in the floating space, but not drawn, not under the pointer and
+    /// never focused, until something activates it again.
+    pub(super) minimized: bool,
+
+    /// It was in the scrolling layout before it was minimized (it goes back there when restored).
+    pub(super) minimized_from_tiling: bool,
+
     /// Snapshot of the last render for use in the close animation.
     unmap_snapshot: Option<TileRenderSnapshot>,
 
@@ -219,6 +226,8 @@ impl<W: LayoutElement> Tile<W> {
             snapped: None,
             unsnapped_size: None,
             unsnapped_pos: None,
+            minimized: false,
+            minimized_from_tiling: false,
             unmap_snapshot: None,
             rounded_corner_damage: Default::default(),
             view_size,

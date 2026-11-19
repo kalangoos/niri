@@ -43,13 +43,14 @@ pub trait ForeignToplevelHandler {
     fn unset_fullscreen(&mut self, wl_surface: WlSurface);
     fn set_maximized(&mut self, wl_surface: WlSurface);
     fn unset_maximized(&mut self, wl_surface: WlSurface);
+    fn set_minimized(&mut self, wl_surface: WlSurface);
 }
 
 struct ToplevelData {
     identifier: MappedId,
     title: Option<String>,
     app_id: Option<String>,
-    states: ArrayVec<u32, 3>,
+    states: ArrayVec<u32, 4>,
     output: Option<Output>,
 
     ext_list_instances: HashSet<ExtForeignToplevelHandleV1>,
@@ -117,6 +118,14 @@ pub fn refresh(state: &mut State) {
     // Save the focused window for last, this way when the focus changes, we will first deactivate
     // the previous window and only then activate the newly focused window.
     let mut focused = None;
+    // (KalangoOS: minimized windows say so to taskbars)
+    let minimized: Vec<_> = state
+        .niri
+        .layout
+        .windows()
+        .filter(|(_, m)| state.niri.layout.is_minimized(&m.window))
+        .map(|(_, m)| m.window.clone())
+        .collect();
     state.niri.layout.with_windows(|mapped, output, _, _| {
         let toplevel = mapped.toplevel();
         let wl_surface = toplevel.wl_surface();
@@ -137,6 +146,7 @@ pub fn refresh(state: &mut State) {
                     cur,
                     output,
                     false,
+                    minimized.contains(&mapped.window),
                 );
             }
         });
@@ -160,6 +170,7 @@ pub fn refresh(state: &mut State) {
                 cur,
                 output.as_ref(),
                 true,
+                false,
             );
         });
     }
@@ -198,8 +209,9 @@ fn refresh_toplevel(
     current: &ToplevelState,
     output: Option<&Output>,
     has_focus: bool,
+    minimized: bool,
 ) {
-    let states = to_state_vec(&current.states, has_focus);
+    let states = to_state_vec(&current.states, has_focus, minimized);
 
     match protocol_state.toplevels.entry(wl_surface.clone()) {
         Entry::Occupied(entry) => {
@@ -586,8 +598,9 @@ where
             zwlr_foreign_toplevel_handle_v1::Request::UnsetMaximized => {
                 state.unset_maximized(surface)
             }
-            zwlr_foreign_toplevel_handle_v1::Request::SetMinimized => (),
-            zwlr_foreign_toplevel_handle_v1::Request::UnsetMinimized => (),
+            zwlr_foreign_toplevel_handle_v1::Request::SetMinimized => state.set_minimized(surface),
+            // (restoring is activating it)
+            zwlr_foreign_toplevel_handle_v1::Request::UnsetMinimized => state.activate(surface),
             zwlr_foreign_toplevel_handle_v1::Request::Activate { .. } => {
                 state.activate(surface);
             }
@@ -619,8 +632,11 @@ where
     }
 }
 
-fn to_state_vec(states: &ToplevelStateSet, has_focus: bool) -> ArrayVec<u32, 3> {
+fn to_state_vec(states: &ToplevelStateSet, has_focus: bool, minimized: bool) -> ArrayVec<u32, 4> {
     let mut rv = ArrayVec::new();
+    if minimized {
+        rv.push(zwlr_foreign_toplevel_handle_v1::State::Minimized as u32);
+    }
     if states.contains(xdg_toplevel::State::Maximized) {
         rv.push(zwlr_foreign_toplevel_handle_v1::State::Maximized as u32);
     }

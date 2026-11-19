@@ -302,7 +302,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
         &self,
     ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>)> {
         let scale = self.scale;
-        self.tiles_with_offsets().map(move |(tile, offset)| {
+        // (minimized windows are neither drawn nor under the pointer)
+        self.tiles_with_offsets().filter(|(tile, _)| !tile.minimized).map(move |(tile, offset)| {
             let pos = offset + tile.render_offset();
             // Round to physical pixels.
             let pos = pos.to_physical_precise_round(scale).to_logical(scale);
@@ -563,7 +564,8 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn activate_window_without_raising(&mut self, id: &W::Id) -> bool {
-        if !self.contains(id) {
+        // (focus following the pointer never wakes a minimized window)
+        if !self.contains(id) || self.is_minimized(id) {
             return false;
         }
 
@@ -575,6 +577,12 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let Some(idx) = self.idx_of(id) else {
             return false;
         };
+
+        // activating a minimized window restores it (the dock, a taskbar, the app asking for focus)
+        if self.tiles[idx].minimized {
+            self.tiles[idx].minimized = false;
+            self.tiles[idx].start_open_animation();
+        }
 
         self.raise_window(idx, 0);
         self.active_window_id = Some(id.clone());
@@ -678,6 +686,43 @@ impl<W: LayoutElement> FloatingSpace<W> {
         self.tiles[idx].floating_preset_width_idx = Some(preset_idx);
 
         self.interactive_resize_end(Some(&id));
+    }
+
+    /// Whether this window is minimized here.
+    pub fn is_minimized(&self, id: &W::Id) -> bool {
+        self.idx_of(id).is_some_and(|idx| self.tiles[idx].minimized)
+    }
+
+    /// Whether a window here is on screen (not minimized).
+    pub fn has_visible_tiles(&self) -> bool {
+        self.tiles.iter().any(|tile| !tile.minimized)
+    }
+
+    /// Minimizes a window here (KalangoOS); the topmost window still on screen becomes the active one.
+    /// Returns false if it is not here or already minimized.
+    pub fn minimize_window(&mut self, id: &W::Id, from_tiling: bool) -> bool {
+        let Some(idx) = self.idx_of(id) else {
+            return false;
+        };
+        if self.tiles[idx].minimized {
+            return false;
+        }
+        self.tiles[idx].minimized = true;
+        self.tiles[idx].minimized_from_tiling = from_tiling;
+        if self.active_window_id.as_ref() == Some(id) {
+            self.active_window_id = self
+                .tiles
+                .iter()
+                .find(|tile| !tile.minimized)
+                .map(|tile| tile.window().id().clone());
+        }
+        true
+    }
+
+    /// Whether this window came from the scrolling layout before it was minimized (cleared).
+    pub fn take_minimized_from_tiling(&mut self, id: &W::Id) -> bool {
+        self.idx_of(id)
+            .is_some_and(|idx| std::mem::take(&mut self.tiles[idx].minimized_from_tiling))
     }
 
     pub fn start_open_animation(&mut self, id: &W::Id) -> bool {
@@ -847,7 +892,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
         let center = self.data[active_idx].center();
 
         let result = zip(&self.tiles, &self.data)
-            .filter(|(tile, _)| tile.window().id() != active_id)
+            .filter(|(tile, _)| tile.window().id() != active_id && !tile.minimized)
             .map(|(tile, data)| (tile, distance(center, data.center())))
             .filter(|(_, dist)| *dist > 0.)
             .min_by(|(_, dist_a), (_, dist_b)| f64::total_cmp(dist_a, dist_b));
@@ -879,6 +924,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_leftmost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.minimized)
             .min_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.x, &pos_b.x));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -889,6 +935,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_rightmost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.minimized)
             .max_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.x, &pos_b.x));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -899,6 +946,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_topmost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.minimized)
             .min_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.y, &pos_b.y));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -909,6 +957,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_bottommost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.minimized)
             .max_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.y, &pos_b.y));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();

@@ -406,6 +406,14 @@ impl XdgShellHandler for State {
         });
     }
 
+    fn minimize_request(&mut self, toplevel: ToplevelSurface) {
+        // (KalangoOS: the window's own minimize button)
+        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(toplevel.wl_surface()) {
+            let window = mapped.window.clone();
+            self.minimize_window(&window);
+        }
+    }
+
     fn maximize_request(&mut self, toplevel: ToplevelSurface) {
         if let Some((mapped, _)) = self
             .niri

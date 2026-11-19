@@ -1831,8 +1831,13 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn activate_window(&mut self, window: &W::Id) -> bool {
+        let was_minimized = self.floating.is_minimized(window);
         if self.floating.activate_window(window) {
             self.floating_is_active = FloatingActive::Yes;
+            // (restored: back to its column when it came from one)
+            if was_minimized && self.floating.take_minimized_from_tiling(window) {
+                self.set_window_floating(Some(window), false);
+            }
             true
         } else if self.scrolling.activate_window(window) {
             self.floating_is_active = FloatingActive::No;
@@ -1877,6 +1882,30 @@ impl<W: LayoutElement> Workspace<W> {
     /// `region`: "left", "right", "up", "down" step like Super+arrows on other desktops (left half →
     /// top-left quarter with up, back with down, the opposite side restores); "restore"; a named region
     /// ("maximize", "left-half", "top-left"…) or "x,y,w,h" in thousandths of the working area.
+    /// Minimizes a window (KalangoOS). A window in the scrolling layout goes to the floating space
+    /// first (and back to a column when restored), so its column closes up meanwhile.
+    pub fn minimize_window(&mut self, id: &W::Id) -> bool {
+        if !self.has_window(id) || self.floating.is_minimized(id) {
+            return false;
+        }
+        let from_tiling = !self.floating.has_window(id);
+        if from_tiling {
+            self.set_window_floating(Some(id), true);
+            if !self.floating.has_window(id) {
+                return false;
+            }
+        }
+        self.floating.minimize_window(id, from_tiling);
+        if !self.floating.has_visible_tiles() {
+            self.floating_is_active = FloatingActive::No;
+        }
+        true
+    }
+
+    pub fn is_minimized(&self, id: &W::Id) -> bool {
+        self.floating.is_minimized(id)
+    }
+
     pub fn snap_window(&mut self, id: Option<&W::Id>, region: &str) {
         let id = match id {
             Some(id) => id.clone(),
