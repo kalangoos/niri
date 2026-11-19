@@ -691,6 +691,19 @@ pub enum Action {
         /// An empty list removes them; they are removed when the drag ends.
         targets: String,
     },
+    /// Render a small picture of a window to a PNG file (KalangoOS window switcher). Unlike a
+    /// screenshot it does not touch the clipboard and shows no notification.
+    ThumbnailWindow {
+        /// Id of the window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// Absolute path of the PNG to write.
+        #[cfg_attr(feature = "clap", arg(long))]
+        path: String,
+        /// Largest side of the picture, in pixels.
+        #[cfg_attr(feature = "clap", arg(long, default_value_t = 320))]
+        max_size: u32,
+    },
     /// Snap a window to a region of the screen (KalangoOS).
     #[cfg_attr(
         feature = "clap",

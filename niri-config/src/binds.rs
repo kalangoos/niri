@@ -293,6 +293,12 @@ pub enum Action {
     #[knuffel(skip)]
     SetSnapTargets(String),
     #[knuffel(skip)]
+    ThumbnailWindow {
+        id: u64,
+        path: String,
+        max_size: u32,
+    },
+    #[knuffel(skip)]
     SnapWindowById {
         id: u64,
         region: String,
@@ -594,6 +600,7 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::SetWindowWidth { id: None, change } => Self::SetWindowWidth(change),
             niri_ipc::Action::SnapWindow { id: None, region } => Self::SnapWindow(region),
             niri_ipc::Action::SetSnapTargets { targets } => Self::SetSnapTargets(targets),
+            niri_ipc::Action::ThumbnailWindow { id, path, max_size } => Self::ThumbnailWindow { id, path, max_size },
             niri_ipc::Action::SnapWindow {
                 id: Some(id),
                 region,

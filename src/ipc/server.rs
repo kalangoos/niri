@@ -461,6 +461,11 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
 }
 
 fn validate_action(action: &Action) -> Result<(), String> {
+    if let Action::ThumbnailWindow { path, .. } = action {
+        if !Path::new(path).is_absolute() {
+            return Err(format!("path must be absolute: {path}"));
+        }
+    }
     if let Action::Screenshot { path, .. }
     | Action::ScreenshotScreen { path, .. }
     | Action::ScreenshotWindow { path, .. }

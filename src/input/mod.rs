@@ -2000,6 +2000,20 @@ impl State {
                     self.niri.layout.set_window_width(None, change);
                 }
             }
+            Action::ThumbnailWindow { id, path, max_size } => {
+                let mut windows = self.niri.layout.windows();
+                let window = windows.find(|(_, m)| m.id().get() == id);
+                if let Some((monitor, mapped)) = window {
+                    let output = monitor.map(|m| m.output().clone()).or_else(|| self.niri.layout.active_output().cloned());
+                    if let Some(output) = output {
+                        self.backend.with_primary_renderer(|renderer| {
+                            if let Err(err) = self.niri.thumbnail_window(renderer, &output, mapped, path, max_size) {
+                                warn!("error making a window thumbnail: {err:?}");
+                            }
+                        });
+                    }
+                }
+            }
             Action::SetSnapTargets(targets) => {
                 self.niri.layout.set_snap_targets(&targets);
                 self.niri.queue_redraw_all();

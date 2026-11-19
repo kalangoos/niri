@@ -5640,6 +5640,55 @@ impl Niri {
             .context("error saving screenshot")
     }
 
+    /// A small picture of a window, written to `path` as PNG (KalangoOS window switcher): rendered at a scale
+    /// that makes its largest side `max_size` pixels, without the clipboard or a notification.
+    pub fn thumbnail_window(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        mapped: &Mapped,
+        path: String,
+        max_size: u32,
+    ) -> anyhow::Result<()> {
+        let size = mapped.window.geometry().size;
+        let largest = size.w.max(size.h).max(1) as f64;
+        let factor = (f64::from(max_size.max(16)) / largest).min(output.current_scale().fractional_scale());
+        let scale = Scale::from(factor);
+        let mut elements: Vec<WindowScreenshotRenderElement<GlesRenderer>> = Vec::new();
+        let ctx = RenderCtx {
+            renderer,
+            target: RenderTarget::ScreenCapture,
+            xray: None,
+        };
+        mapped.render(
+            ctx,
+            mapped.window.geometry().loc.to_f64(),
+            scale,
+            1.,
+            XrayPos::default(),
+            &mut |elem| elements.push(elem.into()),
+        );
+        let geo = encompassing_geo(scale, elements.iter());
+        let elements = elements.iter().rev().map(|elem| {
+            RelocateRenderElement::from_element(elem, geo.loc.upscale(-1), Relocate::Relative)
+        });
+        let pixels = render_to_vec(renderer, geo.size, scale, Transform::Normal, Fourcc::Abgr8888, elements)?;
+        let (w, h) = (geo.size.w as u32, geo.size.h as u32);
+        // encoding is slow: in a thread; written next to the target and renamed, so a reader never sees half a file
+        thread::spawn(move || {
+            let tmp = format!("{path}.tmp");
+            let result = std::fs::File::create(&tmp)
+                .map_err(anyhow::Error::from)
+                .and_then(|f| write_png_rgba8(std::io::BufWriter::new(f), w, h, &pixels).map_err(anyhow::Error::from))
+                .and_then(|_| std::fs::rename(&tmp, &path).map_err(anyhow::Error::from));
+            if let Err(err) = result {
+                warn!("error writing a window thumbnail: {err:?}");
+                let _ = std::fs::remove_file(&tmp);
+            }
+        });
+        Ok(())
+    }
+
     pub fn save_screenshot(
         &self,
         size: Size<i32, Physical>,
