@@ -117,6 +117,8 @@ impl State {
     /// pressed forever (their releases go to another window), e.g. Alt after an Alt+shortcut or
     /// Alt+Tab on the host: typing then turns into shortcuts and clicks into Alt+drag. Release them.
     pub fn release_all_keys(&mut self) {
+        // KalangoOS: the window lost focus: a Mod tap or hold in progress is not one
+        self.kalango_mod_cancel();
         let Some(keyboard) = self.niri.seat.get_keyboard() else {
             return;
         };
@@ -521,6 +523,9 @@ impl State {
                     }
                 }
 
+                // KalangoOS: Mod tapped alone (search) or held alone (voice mode)
+                this.kalango_mod_key(raw, pressed, modifiers, mod_key);
+
                 if let Some(Keysym::space) = raw {
                     this.niri.screenshot_ui.set_space_down(pressed);
                 }
@@ -607,6 +612,58 @@ impl State {
             .unwrap();
 
         self.niri.bind_repeat_timer = Some(token);
+    }
+
+    /// KalangoOS: the Mod key alone. Tapped (pressed and released with nothing else) it runs `KALANGO_MOD_TAP`;
+    /// held for half a second it runs `KALANGO_MOD_HOLD`, and on release `KALANGO_MOD_HOLD_END` (or
+    /// `KALANGO_MOD_HOLD_CANCEL` when another key or a click joins it: it was a shortcut after all). The commands come
+    /// from the session's environment; an empty one does nothing. The key itself still reaches the clients.
+    fn kalango_mod_key(&mut self, raw: Option<Keysym>, pressed: bool, modifiers: Modifiers, mod_key: ModKey) {
+        let is_mod = matches!(
+            (mod_key, raw),
+            (ModKey::Super, Some(Keysym::Super_L | Keysym::Super_R)) | (ModKey::Alt, Some(Keysym::Alt_L | Keysym::Alt_R))
+        );
+        if pressed {
+            if is_mod && (modifiers - mod_key.to_modifiers()).is_empty() && self.niri.kalango_mod.is_none() {
+                let timer = Timer::from_duration(Duration::from_millis(500));
+                let token = self
+                    .niri
+                    .event_loop
+                    .insert_source(timer, |_, _, state| {
+                        if let Some(m) = state.niri.kalango_mod.as_mut() {
+                            m.timer = None;
+                            if !m.held {
+                                m.held = true;
+                                kalango_spawn("KALANGO_MOD_HOLD");
+                            }
+                        }
+                        TimeoutAction::Drop
+                    })
+                    .ok();
+                self.niri.kalango_mod = Some(crate::niri::KalangoMod { held: false, timer: token });
+            } else if !is_mod {
+                self.kalango_mod_cancel();
+            }
+        } else if is_mod {
+            if let Some(m) = self.niri.kalango_mod.take() {
+                if let Some(t) = m.timer {
+                    self.niri.event_loop.remove(t);
+                }
+                kalango_spawn(if m.held { "KALANGO_MOD_HOLD_END" } else { "KALANGO_MOD_TAP" });
+            }
+        }
+    }
+
+    /// Another key or a click with Mod: no tap, no hold.
+    fn kalango_mod_cancel(&mut self) {
+        if let Some(m) = self.niri.kalango_mod.take() {
+            if let Some(t) = m.timer {
+                self.niri.event_loop.remove(t);
+            }
+            if m.held {
+                kalango_spawn("KALANGO_MOD_HOLD_CANCEL");
+            }
+        }
     }
 
     fn hide_cursor_if_needed(&mut self) {
@@ -2780,6 +2837,8 @@ impl State {
     }
 
     fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
+        // KalangoOS: Mod with a click (moving a window) is not a tap
+        self.kalango_mod_cancel();
         let pointer = self.niri.seat.get_pointer().unwrap();
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -5490,5 +5549,14 @@ mod tests {
             ),
             None,
         );
+    }
+}
+
+/// KalangoOS: runs the command an environment variable names (split at spaces), if any.
+fn kalango_spawn(var: &str) {
+    let Ok(cmd) = std::env::var(var) else { return };
+    let args: Vec<String> = cmd.split_whitespace().map(String::from).collect();
+    if !args.is_empty() {
+        crate::utils::spawning::spawn(args, None);
     }
 }

@@ -191,6 +191,12 @@ const CLEAR_COLOR_LOCKED: [f32; 4] = [0.3, 0.1, 0.1, 1.];
 // should be ~1.995 seconds.
 const FRAME_CALLBACK_THROTTLE: Option<Duration> = Some(Duration::from_millis(995));
 
+/// KalangoOS: Mod pressed alone: whether it became a hold, and the timer that makes it one.
+pub struct KalangoMod {
+    pub held: bool,
+    pub timer: Option<RegistrationToken>,
+}
+
 pub struct Niri {
     pub config: Rc<RefCell<Config>>,
 
@@ -328,6 +334,8 @@ pub struct Niri {
     pub suppressed_buttons: HashSet<u32>,
     pub bind_cooldown_timers: HashMap<Key, RegistrationToken>,
     pub bind_repeat_timer: Option<RegistrationToken>,
+    /// KalangoOS: the Mod key pressed alone (a tap or a hold in progress)
+    pub kalango_mod: Option<KalangoMod>,
     pub keyboard_focus: KeyboardFocus,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
@@ -2554,6 +2562,7 @@ impl Niri {
             suppressed_buttons: HashSet::new(),
             bind_cooldown_timers: HashMap::new(),
             bind_repeat_timer: Option::default(),
+            kalango_mod: None,
             presentation_state,
             security_context_state,
             gamma_control_manager_state,
