@@ -2418,14 +2418,22 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn tiles_with_ipc_layouts(&self) -> impl Iterator<Item = (&Tile<W>, WindowLayout)> {
+        // KalangoOS: where each tile is in the workspace view (as floating windows report it), from the view's
+        // target position — not the animated one, to avoid IPC spam. The shell's screenshot tool picks windows by it.
+        let scale = self.scale;
+        let view_off = -self.target_view_pos();
         self.columns
             .iter()
             .enumerate()
             .flat_map(move |(col_idx, col)| {
-                col.tiles().enumerate().map(move |(tile_idx, (tile, _))| {
+                let col_x = self.column_x(col_idx);
+                col.tiles().enumerate().map(move |(tile_idx, (tile, tile_off))| {
+                    let pos = Point::from((view_off + col_x, 0.)) + tile_off;
+                    let pos = pos.to_physical_precise_round(scale).to_logical(scale);
                     let layout = WindowLayout {
                         // Our indices are 1-based, consistent with the actions.
                         pos_in_scrolling_layout: Some((col_idx + 1, tile_idx + 1)),
+                        tile_pos_in_workspace_view: Some(pos.into()),
                         ..tile.ipc_layout_template()
                     };
                     (tile, layout)
