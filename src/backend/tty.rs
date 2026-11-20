@@ -777,6 +777,11 @@ impl Tty {
             GbmDevice::new(device_fd)
         }?;
 
+        // KalangoOS: a software renderer (llvmpipe) is accepted on the primary device, so a computer or VM without
+        // GPU acceleration (VirtualBox without 3D, VMware without 3D, a server's plain VGA) still gets a session
+        // instead of no output at all; secondary devices keep rejecting it (dmabuf imports between renderers)
+        let is_primary = node == self.primary_node;
+        let primary_render_node = self.primary_render_node;
         let mut try_initialize_gpu = || {
             let display = unsafe { EGLDisplay::new(gbm.clone())? };
             let egl_device = EGLDevice::device_for_display(&display)?;
@@ -784,16 +789,20 @@ impl Tty {
             // Software EGL devices (e.g., llvmpipe/softpipe) are rejected for now. They have some
             // problems (segfault on importing dmabufs from other renderers) and need to be
             // excluded from some places like DRM leasing.
+            let software = egl_device.is_software();
             ensure!(
-                !egl_device.is_software(),
+                !software || is_primary,
                 "software EGL renderers are skipped"
             );
+            if software {
+                warn!("no GPU acceleration on the primary device: rendering in software (llvmpipe)");
+            }
 
             let render_node = egl_device
                 .try_get_render_node()
                 .ok()
                 .flatten()
-                .unwrap_or(node);
+                .unwrap_or(if is_primary { primary_render_node } else { node });
             self.gpu_manager
                 .as_mut()
                 .add_node(render_node, gbm.clone())

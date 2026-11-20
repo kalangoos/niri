@@ -12,6 +12,8 @@ upstream; o ramo **`kalangoos`** é o niri v26.04 (`8ed0da4`) com um commit por 
 | posição das janelas lado a lado na IPC | `tile_pos_in_workspace_view` também para janelas em coluna |
 | encaixe nas bordas opcional | Ação `SetEdgeSnap { on }` |
 | minimizar | `xdg set_minimized`, ação `minimize-window`, IPC `is_minimized` |
+| lupa | Ação `SetZoom { factor, mode }`: lente, tela inteira ou metade, fora do bloqueio e das capturas |
+| renderizador por software | Sem aceleração na GPU principal (VirtualBox ou VMware sem 3D), aceita o llvmpipe nela em vez de ficar sem tela |
 
 Os mesmos patches estão em `sessao/niri/` no repositório do KalangoOS, aplicados por `sessao/niri/preparar.sh`.
 Ideias que servem a todos podem ser propostas ao upstream; o resto fica aqui.
