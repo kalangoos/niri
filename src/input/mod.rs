@@ -2117,6 +2117,10 @@ impl State {
             Action::SetEdgeSnap(on) => {
                 self.niri.layout.set_edge_snap(on);
             }
+            Action::SetZoom { factor, mode } => {
+                self.niri.set_zoom(factor, &mode);
+                self.niri.queue_redraw_all();
+            }
             Action::SnapWindow(region) => {
                 self.niri.layout.snap_window(None, &region);
                 self.maybe_warp_cursor_to_focus();

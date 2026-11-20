@@ -197,6 +197,28 @@ pub struct KalangoMod {
     pub timer: Option<RegistrationToken>,
 }
 
+/// KalangoOS magnifier: how much bigger, how it shows, and the ids its elements keep between frames.
+pub struct KalangoZoom {
+    pub factor: f64,
+    pub mode: KalangoZoomMode,
+    id: smithay::backend::renderer::element::Id,
+    border: [smithay::backend::renderer::element::Id; 4],
+    commit: std::cell::Cell<smithay::backend::renderer::utils::CommitCounter>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KalangoZoomMode {
+    /// a rectangle around the pointer (design: 620 × 380)
+    Lens,
+    /// the whole screen
+    Full,
+    /// the half of the screen away from the pointer
+    Half,
+}
+
+/// The lens's size (design "Lupa (Super e +)").
+const KALANGO_LENS: (f64, f64) = (620., 380.);
+
 pub struct Niri {
     pub config: Rc<RefCell<Config>>,
 
@@ -366,6 +388,8 @@ pub struct Niri {
     /// which passes it down through grabs, which decide what to do with it as they see fit.
     pub pointer_contents: PointContents,
     pub pointer_visibility: PointerVisibility,
+    /// KalangoOS magnifier ("Lupa"): on when set.
+    pub kalango_zoom: Option<KalangoZoom>,
     pub pointer_inactivity_timer: Option<RegistrationToken>,
     /// Whether the pointer inactivity timer got reset this event loop iteration.
     ///
@@ -2634,6 +2658,7 @@ impl Niri {
             dnd_icon: None,
             pointer_contents: PointContents::default(),
             pointer_visibility: PointerVisibility::Visible,
+            kalango_zoom: None,
             pointer_inactivity_timer: None,
             pointer_inactivity_timer_got_reset: false,
             notified_activity_this_iteration: false,
@@ -4205,6 +4230,86 @@ impl Niri {
         }
     }
 
+    /// KalangoOS magnifier: on with a factor above 1, off otherwise.
+    pub fn set_zoom(&mut self, factor: f64, mode: &str) {
+        if !(factor > 1.0) {
+            self.kalango_zoom = None;
+            return;
+        }
+        let mode = match mode {
+            "full" | "tela" => KalangoZoomMode::Full,
+            "half" | "metade" => KalangoZoomMode::Half,
+            _ => KalangoZoomMode::Lens,
+        };
+        let factor = factor.min(16.);
+        match &mut self.kalango_zoom {
+            Some(z) => {
+                z.factor = factor;
+                z.mode = mode;
+            }
+            None => {
+                use smithay::backend::renderer::element::Id;
+                self.kalango_zoom = Some(KalangoZoom {
+                    factor,
+                    mode,
+                    id: Id::new(),
+                    border: [Id::new(), Id::new(), Id::new(), Id::new()],
+                    commit: std::cell::Cell::new(smithay::backend::renderer::utils::CommitCounter::default()),
+                });
+            }
+        }
+    }
+
+    /// KalangoOS magnifier: its border and lens, in front of everything but the pointer.
+    fn render_kalango_zoom<R: NiriRenderer>(
+        &self,
+        output: &Output,
+        push: &mut dyn FnMut(OutputRenderElements<R>),
+    ) {
+        let Some(z) = &self.kalango_zoom else { return };
+        let Some(geo) = self.global_space.output_geometry(output) else { return };
+        let pointer = self.seat.get_pointer().unwrap().current_location() - geo.loc.to_f64();
+        let size = geo.size.to_f64();
+        // (only on the output with the pointer)
+        if pointer.x < 0. || pointer.y < 0. || pointer.x >= size.w || pointer.y >= size.h {
+            return;
+        }
+        let lens = match z.mode {
+            KalangoZoomMode::Full => Rectangle::from_size(size),
+            KalangoZoomMode::Half => {
+                let h = (size.h / 2.).floor();
+                let y = if pointer.y > size.h / 2. { 0. } else { size.h - h };
+                Rectangle::new(Point::from((0., y)), Size::from((size.w, h)))
+            }
+            KalangoZoomMode::Lens => {
+                let (w, h) = (KALANGO_LENS.0.min(size.w), KALANGO_LENS.1.min(size.h));
+                let x = (pointer.x - w / 2.).clamp(0., size.w - w);
+                let y = (pointer.y - h / 2.).clamp(0., size.h - h);
+                Rectangle::new(Point::from((x, y)), Size::from((w, h)))
+            }
+        };
+        let source = crate::render_helpers::magnifier::source_rect(pointer, lens.size, z.factor, size);
+        let mut commit = z.commit.get();
+        commit.increment();
+        z.commit.set(commit);
+        // the border: 2 px in the accent, inside the lens (not in full screen)
+        if z.mode == KalangoZoomMode::Lens {
+            let b = 2.;
+            let accent = Color32F::new(0.647, 0.631, 0.886, 1.);
+            let sides = [
+                Rectangle::new(lens.loc, Size::from((lens.size.w, b))),
+                Rectangle::new(Point::from((lens.loc.x, lens.loc.y + lens.size.h - b)), Size::from((lens.size.w, b))),
+                Rectangle::new(lens.loc, Size::from((b, lens.size.h))),
+                Rectangle::new(Point::from((lens.loc.x + lens.size.w - b, lens.loc.y)), Size::from((b, lens.size.h))),
+            ];
+            for (id, r) in z.border.iter().zip(sides) {
+                push(SolidColorRenderElement::new(id.clone(), r, smithay::backend::renderer::utils::CommitCounter::default(), accent, Kind::Unspecified).into());
+            }
+        }
+        let scale = output.current_scale().fractional_scale();
+        push(crate::render_helpers::magnifier::MagnifierElement::new(z.id.clone(), commit, lens, source, scale).into());
+    }
+
     pub fn render_to_vec<R: NiriRenderer>(
         &self,
         ctx: RenderCtx<R>,
@@ -4270,6 +4375,11 @@ impl Niri {
         // The pointer goes on the top.
         if include_pointer && self.pointer_visibility.is_visible() {
             self.render_pointer(ctx.renderer, output, &mut |elem| push(elem.into()));
+        }
+
+        // KalangoOS magnifier: right under the pointer (not on the lock screen, not in screen captures).
+        if !self.is_locked() && ctx.target == RenderTarget::Output {
+            self.render_kalango_zoom(output, push);
         }
 
         // Next, the screen transition texture.
@@ -6634,5 +6744,7 @@ niri_render_elements! {
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
+        // KalangoOS magnifier.
+        Magnifier = crate::render_helpers::magnifier::MagnifierElement,
     }
 }

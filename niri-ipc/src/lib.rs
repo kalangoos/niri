@@ -700,6 +700,16 @@ pub enum Action {
         /// An empty list removes them; they are removed when the drag ends.
         targets: String,
     },
+    /// The magnifier (KalangoOS "Lupa"): the part of the screen around the pointer scaled up.
+    #[cfg_attr(feature = "clap", clap(about = "Turn the magnifier on (factor above 1) or off"))]
+    SetZoom {
+        /// How much bigger: 1 (or less) turns it off.
+        #[cfg_attr(feature = "clap", arg())]
+        factor: f64,
+        /// "lens" (a rectangle around the pointer), "full" (the whole screen) or "half".
+        #[cfg_attr(feature = "clap", arg(long, default_value = "lens"))]
+        mode: String,
+    },
     /// Whether dragging a window to a screen edge or corner snaps it (KalangoOS; on by default).
     #[cfg_attr(feature = "clap", clap(about = "Turn snapping by dragging to the screen edges on or off"))]
     SetEdgeSnap {
