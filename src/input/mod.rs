@@ -525,6 +525,10 @@ impl State {
 
                 // KalangoOS: Mod tapped alone (search) or held alone (voice mode)
                 this.kalango_mod_key(raw, pressed, modifiers, mod_key);
+                // KalangoOS: Esc twice ends a remote session
+                if pressed {
+                    this.kalango_escape(raw);
+                }
 
                 if let Some(Keysym::space) = raw {
                     this.niri.screenshot_ui.set_space_down(pressed);
@@ -651,6 +655,28 @@ impl State {
                 }
                 kalango_spawn(if m.held { "KALANGO_MOD_HOLD_END" } else { "KALANGO_MOD_TAP" });
             }
+        }
+    }
+
+    /// KalangoOS: Escape pressed twice within half a second on this computer's own keyboard, while a remote session
+    /// is going on (`remote_control::session_active`), runs `KALANGO_ESC_DUPLO`: ending the session works wherever
+    /// the focus is. Keys the remote side sends come through the virtual keyboard and never pass here. The key
+    /// itself still reaches the clients.
+    fn kalango_escape(&mut self, raw: Option<Keysym>) {
+        if raw != Some(Keysym::Escape) {
+            self.niri.kalango_last_escape = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        let twice = self
+            .niri
+            .kalango_last_escape
+            .is_some_and(|t| now.duration_since(t) < Duration::from_millis(500));
+        if twice && crate::remote_control::session_active() {
+            self.niri.kalango_last_escape = None;
+            kalango_spawn("KALANGO_ESC_DUPLO");
+        } else {
+            self.niri.kalango_last_escape = Some(now);
         }
     }
 
