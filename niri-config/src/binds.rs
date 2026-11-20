@@ -298,6 +298,8 @@ pub enum Action {
     #[knuffel(skip)]
     SetEdgeSnap(bool),
     #[knuffel(skip)]
+    SetZoom { factor: f64, mode: String },
+    #[knuffel(skip)]
     ThumbnailWindow {
         id: u64,
         path: String,
@@ -608,6 +610,7 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::SnapWindow { id: None, region } => Self::SnapWindow(region),
             niri_ipc::Action::SetSnapTargets { targets } => Self::SetSnapTargets(targets),
             niri_ipc::Action::SetEdgeSnap { on } => Self::SetEdgeSnap(on),
+            niri_ipc::Action::SetZoom { factor, mode } => Self::SetZoom { factor, mode },
             niri_ipc::Action::ThumbnailWindow { id, path, max_size } => Self::ThumbnailWindow { id, path, max_size },
             niri_ipc::Action::SnapWindow {
                 id: Some(id),
