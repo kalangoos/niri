@@ -2369,10 +2369,22 @@ impl Niri {
             InputMethodManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
         let keyboard_shortcuts_inhibit_state =
             KeyboardShortcutsInhibitState::new::<State>(&display_handle);
-        let virtual_keyboard_state =
-            VirtualKeyboardManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
-        let virtual_pointer_state =
-            VirtualPointerManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
+        // KalangoOS: input injection and screen capture only for the clients kalangod allowed
+        // (remote_control.rs); without KALANGO_NIRI_CONTROLE, as upstream
+        let remote = |cap: crate::remote_control::Capability| {
+            let dh = display_handle.clone();
+            move |client: &Client| {
+                client_is_unrestricted(client) && crate::remote_control::allowed(&dh, client, cap)
+            }
+        };
+        let virtual_keyboard_state = VirtualKeyboardManagerState::new::<State, _>(
+            &display_handle,
+            remote(crate::remote_control::Capability::Keyboard),
+        );
+        let virtual_pointer_state = VirtualPointerManagerState::new::<State, _>(
+            &display_handle,
+            remote(crate::remote_control::Capability::Pointer),
+        );
         let foreign_toplevel_state =
             ForeignToplevelManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
         let ext_workspace_state =
@@ -2380,8 +2392,10 @@ impl Niri {
         let mut output_management_state =
             OutputManagementManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
         output_management_state.on_config_changed(config_.outputs.clone());
-        let screencopy_state =
-            ScreencopyManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
+        let screencopy_state = ScreencopyManagerState::new::<State, _>(
+            &display_handle,
+            remote(crate::remote_control::Capability::Screencopy),
+        );
         let viewporter_state = ViewporterState::new::<State>(&display_handle);
         let background_effect_state = BackgroundEffectState::new::<State>(&display_handle);
         let xdg_foreign_state = XdgForeignState::new::<State>(&display_handle);
