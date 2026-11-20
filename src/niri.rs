@@ -336,6 +336,8 @@ pub struct Niri {
     pub bind_repeat_timer: Option<RegistrationToken>,
     /// KalangoOS: the Mod key pressed alone (a tap or a hold in progress)
     pub kalango_mod: Option<KalangoMod>,
+    /// KalangoOS: when Escape was last pressed (Esc Esc ends a remote session).
+    pub kalango_last_escape: Option<std::time::Instant>,
     pub keyboard_focus: KeyboardFocus,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
@@ -2610,6 +2612,7 @@ impl Niri {
             bind_cooldown_timers: HashMap::new(),
             bind_repeat_timer: Option::default(),
             kalango_mod: None,
+            kalango_last_escape: None,
             presentation_state,
             security_context_state,
             gamma_control_manager_state,

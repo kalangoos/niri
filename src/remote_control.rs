@@ -91,6 +91,18 @@ pub fn allowed(dh: &DisplayHandle, client: &Client, cap: Capability) -> bool {
     ok
 }
 
+/// Whether the allow file gives anything to a single process: a remote session is going on.
+pub fn in_session(text: &str) -> bool {
+    text.lines().any(|line| line.split_whitespace().next() == Some("pid"))
+}
+
+/// Whether a remote session is going on in this compositor (see `in_session`).
+pub fn session_active() -> bool {
+    std::env::var_os("KALANGO_NIRI_CONTROLE")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|text| in_session(&text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +123,11 @@ mod tests {
         assert!(!permits("", &other, Capability::Keyboard));
         let no_exe = Process { pid: 8, exe: String::new(), start_time: 0 };
         assert!(!permits("exe  teclado", &no_exe, Capability::Keyboard));
+    }
+
+    #[test]
+    fn a_session_is_a_grant_by_pid() {
+        assert!(!in_session("exe /usr/bin/kalango-shell teclado\n"));
+        assert!(in_session("exe /usr/bin/kalango-shell teclado\npid 4242 987654 captura\n"));
     }
 }
