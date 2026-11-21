@@ -167,6 +167,22 @@ impl State {
         let hide_exit_confirm_dialog =
             self.niri.exit_confirm_dialog.is_open() && should_hide_exit_confirm_dialog(&event);
 
+        // KalangoOS: the person's own keyboard or mouse while an agent controls the screen
+        if std::any::TypeId::of::<I>()
+            != std::any::TypeId::of::<crate::protocols::virtual_pointer::VirtualPointerInputBackend>()
+            && matches!(
+                event,
+                InputEvent::Keyboard { .. }
+                    | InputEvent::PointerMotion { .. }
+                    | InputEvent::PointerMotionAbsolute { .. }
+                    | InputEvent::PointerButton { .. }
+                    | InputEvent::PointerAxis { .. }
+                    | InputEvent::TouchDown { .. }
+            )
+        {
+            self.kalango_person_input();
+        }
+
         let mut consumed_by_a11y = false;
         use InputEvent::*;
         match event {
@@ -677,6 +693,28 @@ impl State {
             kalango_spawn("KALANGO_ESC_DUPLO");
         } else {
             self.niri.kalango_last_escape = Some(now);
+        }
+    }
+
+    /// KalangoOS: the person used this computer's own keyboard, mouse or touch while an agent controls the screen
+    /// (`remote_control::agent_session_active`): `KALANGO_PESSOA_ATIVA` runs (kalangod ends the agent's session —
+    /// the agent yields). Only that it happened is told, never which key. The agent's own input comes through the
+    /// virtual pointer and keyboard and never counts. The allow file is read at most twice a second, and the
+    /// command runs at most once a second.
+    fn kalango_person_input(&mut self) {
+        let now = std::time::Instant::now();
+        let recent = |t: Option<std::time::Instant>, ms: u64| {
+            t.is_some_and(|t| now.duration_since(t) < Duration::from_millis(ms))
+        };
+        if recent(self.niri.kalango_person_told, 1000)
+            || recent(self.niri.kalango_person_checked, 500)
+        {
+            return;
+        }
+        self.niri.kalango_person_checked = Some(now);
+        if crate::remote_control::agent_session_active() {
+            self.niri.kalango_person_told = Some(now);
+            kalango_spawn("KALANGO_PESSOA_ATIVA");
         }
     }
 

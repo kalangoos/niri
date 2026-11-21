@@ -103,6 +103,22 @@ pub fn session_active() -> bool {
         .is_some_and(|text| in_session(&text))
 }
 
+/// Whether an agent controls the screen: a grant by pid with the word `agente` among its capabilities (kalangod
+/// writes it for the screen helper of an agent's session; Kalango Remote's grants do not have it).
+pub fn agent_in_session(text: &str) -> bool {
+    text.lines().any(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        matches!(f.as_slice(), ["pid", _, _, caps] if caps.split(',').any(|c| c == "agente"))
+    })
+}
+
+/// Whether an agent controls the screen of this compositor now (see `agent_in_session`).
+pub fn agent_session_active() -> bool {
+    std::env::var_os("KALANGO_NIRI_CONTROLE")
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|text| agent_in_session(&text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +145,12 @@ mod tests {
     fn a_session_is_a_grant_by_pid() {
         assert!(!in_session("exe /usr/bin/kalango-shell teclado\n"));
         assert!(in_session("exe /usr/bin/kalango-shell teclado\npid 4242 987654 captura\n"));
+    }
+
+    #[test]
+    fn an_agent_session_is_marked() {
+        assert!(!agent_in_session("pid 4242 987654 captura,ponteiro,teclado\n"), "Kalango Remote's");
+        assert!(agent_in_session("exe /usr/bin/kalango-shell teclado\npid 7 9 captura,ponteiro,teclado,agente\n"));
+        assert!(!agent_in_session("exe /usr/bin/x captura,agente\n"), "only a grant to one process");
     }
 }

@@ -676,24 +676,44 @@ impl VirtualPointerHandler for State {
     }
 
     fn on_virtual_pointer_motion(&mut self, event: VirtualPointerMotionEvent) {
+        if self.kalango_virtual_pointer_held() {
+            return;
+        }
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerMotion { event });
     }
 
     fn on_virtual_pointer_motion_absolute(&mut self, event: VirtualPointerMotionAbsoluteEvent) {
+        if self.kalango_virtual_pointer_held() {
+            return;
+        }
         self.process_input_event(
             InputEvent::<VirtualPointerInputBackend>::PointerMotionAbsolute { event },
         );
     }
 
     fn on_virtual_pointer_button(&mut self, event: VirtualPointerButtonEvent) {
+        if self.kalango_virtual_pointer_held() {
+            return;
+        }
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerButton { event });
     }
 
     fn on_virtual_pointer_axis(&mut self, event: VirtualPointerAxisEvent) {
+        if self.kalango_virtual_pointer_held() {
+            return;
+        }
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerAxis { event });
     }
 }
 delegate_virtual_pointer!(State);
+
+impl State {
+    /// KalangoOS: with the session locked and an agent controlling the screen, the virtual pointer does nothing —
+    /// the lock screen is never an agent's to click (kalangod also ends the session when the shell locks).
+    fn kalango_virtual_pointer_held(&self) -> bool {
+        self.niri.is_locked() && crate::remote_control::agent_session_active()
+    }
+}
 
 impl DrmLeaseHandler for State {
     fn drm_lease_state(&mut self, node: DrmNode) -> &mut DrmLeaseState {

@@ -360,6 +360,10 @@ pub struct Niri {
     pub kalango_mod: Option<KalangoMod>,
     /// KalangoOS: when Escape was last pressed (Esc Esc ends a remote session).
     pub kalango_last_escape: Option<std::time::Instant>,
+    /// KalangoOS: when the person's own input was last checked against an agent's screen session, and when the
+    /// session was last told (both throttle reading the allow file and spawning).
+    pub kalango_person_checked: Option<std::time::Instant>,
+    pub kalango_person_told: Option<std::time::Instant>,
     pub keyboard_focus: KeyboardFocus,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
@@ -2637,6 +2641,8 @@ impl Niri {
             bind_repeat_timer: Option::default(),
             kalango_mod: None,
             kalango_last_escape: None,
+            kalango_person_checked: None,
+            kalango_person_told: None,
             presentation_state,
             security_context_state,
             gamma_control_manager_state,
