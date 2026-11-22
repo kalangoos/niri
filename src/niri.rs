@@ -369,6 +369,14 @@ pub struct Niri {
     /// on only while `kalango_privacy_covering` says so.
     pub kalango_privacy: bool,
     pub kalango_privacy_app: i32,
+    /// The grant privacy mode comes from (core pid, its start time) and the one the person overrode with Esc Esc: while
+    /// the cover is on, the compositor's own Esc Esc lifts it for that grant (a hung app or core must not leave a black
+    /// screen with no way out); a new or ended grant ends the override.
+    pub kalango_privacy_grant: (i32, u64),
+    pub kalango_privacy_override: Option<(i32, u64)>,
+    /// Keys whose press the cover kept from the clients: their release is kept too (a key held when the cover began
+    /// is not in it, and its release does reach the client).
+    pub kalango_covered_keys: HashSet<Keycode>,
     /// KalangoOS: the input event being processed came from the virtual pointer (the remote side).
     pub kalango_input_virtual: bool,
     pub keyboard_focus: KeyboardFocus,
@@ -2667,6 +2675,9 @@ impl Niri {
             kalango_person_told: None,
             kalango_privacy: false,
             kalango_privacy_app: 0,
+            kalango_privacy_grant: (0, 0),
+            kalango_privacy_override: None,
+            kalango_covered_keys: HashSet::new(),
             kalango_input_virtual: false,
             presentation_state,
             security_context_state,
@@ -3817,23 +3828,28 @@ impl Niri {
             .event_loop
             .insert_source(Timer::from_duration(every), move |_, _, state| {
                 use crate::remote_control::Privacy;
-                let (on, app) = match crate::remote_control::privacy_state() {
-                    Privacy::On(app) => {
+                let (on, app, grant) = match crate::remote_control::privacy_state() {
+                    Privacy::On { app, core, start } => {
                         warned_unreadable = false;
-                        (true, app)
+                        (true, app, (core, start))
                     }
                     Privacy::Off => {
                         warned_unreadable = false;
-                        (false, 0)
+                        (false, 0, (0, 0))
                     }
                     Privacy::Unreadable => {
                         if state.niri.kalango_privacy && !warned_unreadable {
                             warn!("privacy mode: the allow file cannot be read or trusted; the cover is lifted");
                         }
                         warned_unreadable = true;
-                        (false, 0)
+                        (false, 0, (0, 0))
                     }
                 };
+                // the override belongs to one grant: another grant (or none) ends it
+                if state.niri.kalango_privacy_override.is_some_and(|o| !on || o != grant) {
+                    state.niri.kalango_privacy_override = None;
+                }
+                state.niri.kalango_privacy_grant = grant;
                 if let Some(text) = std::env::var_os("KALANGO_NIRI_CONTROLE").and_then(|p| std::fs::read_to_string(p).ok()) {
                     let n = crate::remote_control::malformed_grants(&text);
                     if n != warned_malformed && n > 0 {
@@ -3875,6 +3891,10 @@ impl Niri {
     /// controls and reach Stop. Without the banner (the app died, was killed, closed it) the cover is lifted.
     pub fn kalango_privacy_covering(&self) -> bool {
         if !self.kalango_privacy || self.is_locked() {
+            return false;
+        }
+        // Esc Esc on this computer's keyboard lifted it for this grant (the app or the core was hung)
+        if self.kalango_privacy_override == Some(self.kalango_privacy_grant) {
             return false;
         }
         self.output_state.keys().any(|output| {

@@ -579,11 +579,30 @@ impl State {
                 };
 
                 // KalangoOS privacy mode: the person's own keys reach no client (the screen is covered, they
-                // would type blind into the session being controlled); binds (power key, lock, VT switch) and
-                // Esc Esc above still work.
-                // (never on the lock screen, nor without the banner: `kalango_privacy_covering`)
-                if this.niri.kalango_privacy_covering() && matches!(res, FilterResult::Forward) {
-                    return FilterResult::Intercept(None);
+                // would type blind into the session being controlled), and the compositor's own binds, which act
+                // blind too (close-window, screenshots, focus…), do nothing; the way out stays: Esc Esc above, a VT
+                // switch, quit, suspend and monitors off (the power key), and the binds that spawn a program (the lock
+                // screen is one). A key held when the cover began gets its release in the hidden client; a key pressed
+                // under the cover has its release kept. (never on the lock screen, nor without the banner, nor after
+                // Esc Esc lifted it: `kalango_privacy_covering`)
+                if this.niri.kalango_privacy_covering() {
+                    match &res {
+                        FilterResult::Forward => {
+                            if pressed {
+                                this.niri.kalango_covered_keys.insert(key_code);
+                                return FilterResult::Intercept(None);
+                            }
+                            if this.niri.kalango_covered_keys.remove(&key_code) {
+                                return FilterResult::Intercept(None);
+                            }
+                        }
+                        FilterResult::Intercept(Some(bind)) if !kalango_cover_allows(&bind.action) => {
+                            return FilterResult::Intercept(None);
+                        }
+                        _ => {}
+                    }
+                } else if !this.niri.kalango_covered_keys.is_empty() {
+                    this.niri.kalango_covered_keys.clear();
                 }
 
                 if matches!(res, FilterResult::Forward) {
@@ -706,6 +725,20 @@ impl State {
             .is_some_and(|t| now.duration_since(t) < Duration::from_millis(500));
         if twice && crate::remote_control::session_active() {
             self.niri.kalango_last_escape = None;
+            // Under the privacy cover the way out must not depend on the app (it may be hung, and `end-sessions` then
+            // waits for it forever): the compositor lifts the cover for this grant itself — the banner, the outline
+            // and the whole desktop are then visible and usable — and ends the session by stopping its core (it is
+            // this user's own process). The command still runs for the app to tidy up when it can.
+            if self.niri.kalango_privacy_covering() {
+                let (core, _) = self.niri.kalango_privacy_grant;
+                warn!("Esc Esc under the privacy cover: lifting it and stopping the remote core {core}");
+                self.niri.kalango_privacy_override = Some(self.niri.kalango_privacy_grant);
+                if core > 1 {
+                    // SAFETY: plain kill(2) to a pid of the grant (verified against its start time by the watch).
+                    unsafe { libc::kill(core, libc::SIGTERM) };
+                }
+                self.niri.queue_redraw_all();
+            }
             kalango_spawn("KALANGO_ESC_DUPLO");
         } else {
             self.niri.kalango_last_escape = Some(now);
@@ -2622,7 +2655,9 @@ impl State {
         //
         // FIXME: ideally this should use the pointer focus with up-to-date global location.
         let mut pointer_confined = None;
-        if let Some(under) = &self.niri.pointer_contents.surface {
+        // (under the privacy cover the focus is not the hidden app's: its constraint must not hold the person's pointer,
+        // nor get relative motion)
+        if let Some(under) = self.niri.pointer_contents.surface.as_ref().filter(|_| !self.kalango_local_covered()) {
             // No need to check if the pointer focus surface matches, because here we're checking
             // for an already-active constraint, and the constraint is deactivated when the focused
             // surface changes.
@@ -5698,4 +5733,18 @@ fn kalango_spawn(var: &str) {
     if !args.is_empty() {
         crate::utils::spawning::spawn(args, None);
     }
+}
+
+/// KalangoOS privacy mode: the compositor binds that still work under the cover (the emergency ones; the rest would act
+/// blind): quit, a VT switch, suspend, monitors off, and the binds that spawn a program (KalangoOS's lock is one).
+fn kalango_cover_allows(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Quit(_)
+            | Action::ChangeVt(_)
+            | Action::Suspend
+            | Action::PowerOffMonitors
+            | Action::Spawn(_)
+            | Action::SpawnSh(_)
+    )
 }

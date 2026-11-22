@@ -133,13 +133,13 @@ pub fn agent_session_active() -> bool {
 /// the app (its parent) dead; no mapped `kalango-remote-banner` layer owned by that app on any output (see
 /// `Niri::kalango_privacy_covering`); the session locked. What fails closed: nothing but a live grant with a live app
 /// and a live banner. Warnings are logged for the unreadable and malformed cases.
-pub fn privacy_grant(text: &str, lookup: impl Fn(i32, u64) -> Option<i32>) -> Option<i32> {
+pub fn privacy_grant(text: &str, lookup: impl Fn(i32, u64) -> Option<i32>) -> Option<(i32, u64, i32)> {
     text.lines().find_map(|line| {
         let f: Vec<&str> = line.split_whitespace().collect();
         match f.as_slice() {
             ["pid", pid, start, caps] if caps.split(',').any(|c| c == "privacidade") => {
                 match (pid.parse(), start.parse()) {
-                    (Ok(p), Ok(s)) => lookup(p, s),
+                    (Ok(p), Ok(s)) => lookup(p, s).map(|app| (p, s, app)),
                     _ => None,
                 }
             }
@@ -180,8 +180,8 @@ pub fn core_app_pid(pid: i32, start: u64) -> Option<i32> {
 pub enum Privacy {
     /// Not wanted (no file, no variable, no grant with the word, a dead core or app).
     Off,
-    /// Wanted; the layers of this app pid are the ones to trust.
-    On(i32),
+    /// Wanted by the grant to process `core` (started at `start`); the layers of the app `app` are the ones to trust.
+    On { app: i32, core: i32, start: u64 },
     /// The file is there but cannot be trusted or read.
     Unreadable,
 }
@@ -197,7 +197,7 @@ pub fn privacy_state() -> Privacy {
         return Privacy::Unreadable;
     };
     match privacy_grant(&text, core_app_pid) {
-        Some(app) => Privacy::On(app),
+        Some((core, start, app)) => Privacy::On { app, core, start },
         None => Privacy::Off,
     }
 }
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn privacy_needs_the_word_the_same_process_and_its_app() {
         let lookup = |pid: i32, start: u64| (pid == 4242 && start == 987654).then_some(555);
-        assert_eq!(privacy_grant("pid 4242 987654 captura,ponteiro,teclado,privacidade\n", lookup), Some(555));
+        assert_eq!(privacy_grant("pid 4242 987654 captura,ponteiro,teclado,privacidade\n", lookup), Some((4242, 987654, 555)));
         assert_eq!(privacy_grant("pid 4242 987654 captura,ponteiro,teclado\n", lookup), None, "no word, no cover");
         assert_eq!(privacy_grant("pid 4242 1 captura,privacidade\n", lookup), None, "a reused pid is another process");
         assert_eq!(privacy_grant("pid 77 987654 privacidade\n", lookup), None, "the core died");
@@ -265,5 +265,54 @@ mod tests {
     #[test]
     fn grants_that_cannot_be_read_are_counted() {
         assert_eq!(malformed_grants("pid 1 2 captura\npid x 2 captura\npid 1 captura\nexe /x captura\npid 3 4 a,b"), 2);
+    }
+
+    /// `core_app_pid` against real processes: an app and its core in a temp dir (copies of `sh` and `sleep` named like
+    /// Kalango Remote's), independent of any layer or banner.
+    #[test]
+    fn the_core_belongs_to_the_kalango_remote_next_to_it() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        let dir = std::env::temp_dir().join(format!("niri-core-app-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = |from: &str, to: &str| {
+            let p = dir.join(to);
+            std::fs::copy(from, &p).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let app_exe = copy("/bin/sh", "kalango-remote");
+        let core_exe = copy("/bin/sleep", "kalango-remote-core");
+        let other_exe = copy("/bin/sh", "another-app");
+        let start_of = |pid: i32| start_time(pid).unwrap();
+        let core_of = |app_exe: &std::path::Path| {
+            // the "app" starts the "core" as its child and waits; it prints the core's pid
+            let mut app = Command::new(app_exe)
+                .args(["-c", &format!("{} 30 & echo $!; wait", core_exe.display())])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(app.stdout.take().unwrap()), &mut line).unwrap();
+            (app, line.trim().parse::<i32>().unwrap())
+        };
+        let (mut app, core) = core_of(&app_exe);
+        assert_eq!(core_app_pid(core, start_of(core)), Some(app.id() as i32), "the app next to the core owns it");
+        assert_eq!(core_app_pid(core, start_of(core) + 1), None, "another start time is another process");
+        let _ = Command::new("kill").arg(core.to_string()).status();
+        let _ = app.kill();
+        let _ = app.wait();
+        // a core whose parent is another program is nobody's
+        let (mut other, core2) = core_of(&other_exe);
+        assert_eq!(core_app_pid(core2, start_of(core2)), None, "the parent is not the kalango-remote next to the core");
+        let _ = Command::new("kill").arg(core2.to_string()).status();
+        let _ = other.kill();
+        let _ = other.wait();
+        // a core started by this test process (its parent is the test binary)
+        let mut orphan = Command::new(&core_exe).arg("30").spawn().unwrap();
+        assert_eq!(core_app_pid(orphan.id() as i32, start_of(orphan.id() as i32)), None);
+        let _ = orphan.kill();
+        let _ = orphan.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
