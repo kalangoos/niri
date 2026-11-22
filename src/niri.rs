@@ -364,6 +364,21 @@ pub struct Niri {
     /// session was last told (both throttle reading the allow file and spawning).
     pub kalango_person_checked: Option<std::time::Instant>,
     pub kalango_person_told: Option<std::time::Instant>,
+    /// KalangoOS: privacy mode (`remote_control::privacy_state`): wanted by a live grant whose app is alive. The
+    /// pid is that app's: only layers of its own process count as Kalango Remote's. Refreshed by a timer. The cover is
+    /// on only while `kalango_privacy_covering` says so.
+    pub kalango_privacy: bool,
+    pub kalango_privacy_app: i32,
+    /// The grant privacy mode comes from (core pid, its start time) and the one the person overrode with Esc Esc: while
+    /// the cover is on, the compositor's own Esc Esc lifts it for that grant (a hung app or core must not leave a black
+    /// screen with no way out); a new or ended grant ends the override.
+    pub kalango_privacy_grant: (i32, u64),
+    pub kalango_privacy_override: Option<(i32, u64)>,
+    /// Keys whose press the cover kept from the clients: their release is kept too (a key held when the cover began
+    /// is not in it, and its release does reach the client).
+    pub kalango_covered_keys: HashSet<Keycode>,
+    /// KalangoOS: the input event being processed came from the virtual pointer (the remote side).
+    pub kalango_input_virtual: bool,
     pub keyboard_focus: KeyboardFocus,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
@@ -519,6 +534,8 @@ pub struct OutputState {
     pub lock_render_state: LockRenderState,
     pub lock_surface: Option<LockSurface>,
     pub lock_color_buffer: SolidColorBuffer,
+    /// KalangoOS: the black cover of privacy mode.
+    pub kalango_cover_buffer: SolidColorBuffer,
     screen_transition: Option<ScreenTransition>,
     /// Damage tracker used for the debug damage visualization.
     pub debug_damage_tracker: OutputDamageTracker,
@@ -1087,6 +1104,19 @@ impl State {
             },
         };
         self.move_cursor_to_focused_tile(focused)
+    }
+
+    /// KalangoOS: privacy mode just turned on. What could swallow the person's click on Stop (the screenshot UI, the
+    /// Alt-Tab switcher, the exit dialog, the hotkey overlay) is closed, and the pointer's focus is taken again so
+    /// the programs hidden by the cover get a "leave" (a button the person held when the cover came is not stuck).
+    pub fn kalango_privacy_begin(&mut self) {
+        if self.niri.screenshot_ui.close() {
+            self.niri.cursor_manager.set_cursor_image(CursorImageStatus::default_named());
+        }
+        self.niri.cancel_mru();
+        self.niri.exit_confirm_dialog.hide();
+        self.niri.hotkey_overlay.hide();
+        self.refresh_pointer_contents();
     }
 
     pub fn refresh_pointer_contents(&mut self) {
@@ -2643,6 +2673,12 @@ impl Niri {
             kalango_last_escape: None,
             kalango_person_checked: None,
             kalango_person_told: None,
+            kalango_privacy: false,
+            kalango_privacy_app: 0,
+            kalango_privacy_grant: (0, 0),
+            kalango_privacy_override: None,
+            kalango_covered_keys: HashSet::new(),
+            kalango_input_virtual: false,
             presentation_state,
             security_context_state,
             gamma_control_manager_state,
@@ -2963,6 +2999,7 @@ impl Niri {
             lock_render_state,
             lock_surface: None,
             lock_color_buffer: SolidColorBuffer::new(size, CLEAR_COLOR_LOCKED),
+            kalango_cover_buffer: SolidColorBuffer::new(size, [0., 0., 0., 1.]),
             screen_transition: None,
             debug_damage_tracker: OutputDamageTracker::from_output(&output),
         };
@@ -3086,6 +3123,7 @@ impl Niri {
             state.backdrop_buffer.resize(output_size);
 
             state.lock_color_buffer.resize(output_size);
+            state.kalango_cover_buffer.resize(output_size);
             if let Some(lock_surface) = &state.lock_surface {
                 configure_lock_surface(lock_surface, output);
             }
@@ -3381,6 +3419,39 @@ impl Niri {
 
         // The ordering here must be consistent with the ordering in render() so that input is
         // consistent with the visuals.
+
+        // KalangoOS privacy mode: what the person's own pointer can touch is what the cover draws and nothing else —
+        // Kalango Remote's own layers (Overlay, then Top), whatever is above them in the real layout (another overlay
+        // layer, a dialog, a fullscreen window) notwithstanding, and no hot corner. The remote side's pointer sees the
+        // real desktop as always.
+        if !self.kalango_input_virtual && self.kalango_privacy_covering() {
+            let layers = layer_map_for_output(output);
+            for layer in [Layer::Overlay, Layer::Top] {
+                for popup in [true, false] {
+                    let hit = layers.layers_on(layer).rev().find_map(|layer_surface| {
+                        if !self.mapped_layer_surfaces.contains_key(layer_surface)
+                            || !self.kalango_trusted_layer(layer_surface)
+                        {
+                            return None;
+                        }
+                        let mapped = self.mapped_layer_surfaces.get(layer_surface)?;
+                        let mut loc = layers.layer_geometry(layer_surface)?.loc.to_f64();
+                        loc += mapped.bob_offset();
+                        let surface_type = if popup { WindowSurfaceType::POPUP } else { WindowSurfaceType::TOPLEVEL }
+                            | WindowSurfaceType::SUBSURFACE;
+                        layer_surface
+                            .surface_under(pos_within_output - loc, surface_type)
+                            .map(|(surface, pos_within_layer)| ((surface, pos_within_layer.to_f64() + loc), layer_surface.clone()))
+                    });
+                    if let Some(((surface, pos), layer_surface)) = hit {
+                        rv.surface = Some((surface, pos + output_pos_in_global_space.to_f64()));
+                        rv.layer = Some(layer_surface);
+                        return rv;
+                    }
+                }
+            }
+            return rv;
+        }
 
         if self.exit_confirm_dialog.is_open() {
             return rv;
@@ -3746,6 +3817,95 @@ impl Niri {
     }
 
     /// Schedules an immediate redraw on all outputs if one is not already scheduled.
+    /// KalangoOS privacy mode: looks at the allow file four times a second (only with `KALANGO_NIRI_CONTROLE`):
+    /// a session ended, a dead core or a dead app lifts the cover. Never fails closed: an unreadable allow file
+    /// lifts it too (with a warning).
+    pub fn start_kalango_privacy_watch(&self) {
+        let every = Duration::from_millis(250);
+        let mut warned_unreadable = false;
+        let mut warned_malformed = 0;
+        let result = self
+            .event_loop
+            .insert_source(Timer::from_duration(every), move |_, _, state| {
+                use crate::remote_control::Privacy;
+                let (on, app, grant) = match crate::remote_control::privacy_state() {
+                    Privacy::On { app, core, start } => {
+                        warned_unreadable = false;
+                        (true, app, (core, start))
+                    }
+                    Privacy::Off => {
+                        warned_unreadable = false;
+                        (false, 0, (0, 0))
+                    }
+                    Privacy::Unreadable => {
+                        if state.niri.kalango_privacy && !warned_unreadable {
+                            warn!("privacy mode: the allow file cannot be read or trusted; the cover is lifted");
+                        }
+                        warned_unreadable = true;
+                        (false, 0, (0, 0))
+                    }
+                };
+                // the override belongs to one grant: another grant (or none) ends it
+                if state.niri.kalango_privacy_override.is_some_and(|o| !on || o != grant) {
+                    state.niri.kalango_privacy_override = None;
+                }
+                state.niri.kalango_privacy_grant = grant;
+                if let Some(text) = std::env::var_os("KALANGO_NIRI_CONTROLE").and_then(|p| std::fs::read_to_string(p).ok()) {
+                    let n = crate::remote_control::malformed_grants(&text);
+                    if n != warned_malformed && n > 0 {
+                        warn!("remote control: {n} malformed grant line(s) in the allow file ignored");
+                    }
+                    warned_malformed = n;
+                }
+                if on != state.niri.kalango_privacy || app != state.niri.kalango_privacy_app {
+                    info!("privacy mode: {} (app {app})", if on { "on" } else { "off" });
+                    state.niri.kalango_privacy = on;
+                    state.niri.kalango_privacy_app = app;
+                    if on {
+                        state.kalango_privacy_begin();
+                    }
+                    state.niri.queue_redraw_all();
+                }
+                TimeoutAction::ToDuration(every)
+            });
+        if let Err(err) = result {
+            warn!("could not start the privacy mode watch: {err:?}");
+        }
+    }
+
+    /// KalangoOS: whether a layer surface is Kalango Remote's own: a `kalango-remote-` namespace *and* a client that
+    /// is the app that owns the live grant. Any program can claim a namespace; only the app is the app.
+    pub fn kalango_trusted_layer(&self, layer: &smithay::desktop::LayerSurface) -> bool {
+        if !self.kalango_privacy || !layer.namespace().starts_with("kalango-remote-") {
+            return false;
+        }
+        layer
+            .wl_surface()
+            .client()
+            .and_then(|c| c.get_credentials(&self.display_handle).ok())
+            .is_some_and(|cred| cred.pid == self.kalango_privacy_app)
+    }
+
+    /// KalangoOS: the cover is on: privacy mode is wanted, the session is not locked (the person must be able to type
+    /// the password) and at least one mapped `kalango-remote-banner` of the app is up, so the person can always see who
+    /// controls and reach Stop. Without the banner (the app died, was killed, closed it) the cover is lifted.
+    pub fn kalango_privacy_covering(&self) -> bool {
+        if !self.kalango_privacy || self.is_locked() {
+            return false;
+        }
+        // Esc Esc on this computer's keyboard lifted it for this grant (the app or the core was hung)
+        if self.kalango_privacy_override == Some(self.kalango_privacy_grant) {
+            return false;
+        }
+        self.output_state.keys().any(|output| {
+            layer_map_for_output(output).layers().any(|l| {
+                self.mapped_layer_surfaces.contains_key(l)
+                    && l.namespace() == "kalango-remote-banner"
+                    && self.kalango_trusted_layer(l)
+            })
+        })
+    }
+
     pub fn queue_redraw_all(&mut self) {
         for state in self.output_state.values_mut() {
             state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
@@ -4381,6 +4541,48 @@ impl Niri {
         // The pointer goes on the top.
         if include_pointer && self.pointer_visibility.is_visible() {
             self.render_pointer(ctx.renderer, output, &mut |elem| push(elem.into()));
+        }
+
+        // KalangoOS privacy mode: on the local monitors only Kalango Remote's own signals (the banner with the
+        // stop button, the outline — layers of the Kalango Remote app itself, see `kalango_trusted_layer`) over a
+        // black cover; nothing else is drawn (not the magnifier, the screen transition texture — a frame of the real
+        // desktop —, the exit dialog or the config notification), so nothing leaks. Screen captures render with
+        // another target and still see the real desktop. Never while locked: the lock screen shows nothing private
+        // and the person types the password.
+        if ctx.target == RenderTarget::Output && self.kalango_privacy_covering() {
+            let layer_map = layer_map_for_output(output);
+            for layer in [Layer::Overlay, Layer::Top] {
+                for (mapped, geo) in self.layers_in_render_order(&layer_map, layer, false) {
+                    if !self.kalango_trusted_layer(mapped.surface()) {
+                        continue;
+                    }
+                    let loc = geo.loc.to_f64();
+                    mapped.render_popups(
+                        ctx.r(),
+                        None,
+                        loc,
+                        XrayPos::default().offset(loc),
+                        &mut |elem| push(elem.into()),
+                    );
+                    mapped.render_normal(
+                        ctx.r(),
+                        None,
+                        loc,
+                        XrayPos::default().offset(loc),
+                        &mut |elem| push(elem.into()),
+                    );
+                }
+            }
+            push(
+                SolidColorRenderElement::from_buffer(
+                    &state.kalango_cover_buffer,
+                    (0., 0.),
+                    1.,
+                    Kind::Unspecified,
+                )
+                .into(),
+            );
+            return;
         }
 
         // KalangoOS magnifier: right under the pointer (not on the lock screen, not in screen captures).

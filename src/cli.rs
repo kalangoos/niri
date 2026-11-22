@@ -103,6 +103,8 @@ pub enum Msg {
     EventStream,
     /// Print the version of the running niri instance.
     Version,
+    /// KalangoOS: list what this compositor adds to upstream niri, one per line.
+    KalangoFeatures,
     /// Request an error from the running niri instance.
     RequestError,
     /// Print the overview state.

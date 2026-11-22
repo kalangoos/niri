@@ -200,6 +200,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("IPC listening on: {}", socket_path.to_string_lossy());
     }
 
+    // KalangoOS privacy mode (needs the allow file of the remote control).
+    if env::var_os("KALANGO_NIRI_CONTROLE").is_some() {
+        state.niri.start_kalango_privacy_watch();
+    }
+
     // Setup xwayland-satellite integration.
     xwayland::satellite::setup(&mut state);
     if let Some(satellite) = &state.niri.satellite {

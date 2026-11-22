@@ -167,9 +167,13 @@ impl State {
         let hide_exit_confirm_dialog =
             self.niri.exit_confirm_dialog.is_open() && should_hide_exit_confirm_dialog(&event);
 
+        // KalangoOS: whether this event came from the virtual pointer (the remote side) and not from this computer's
+        // own devices (privacy mode never blocks the former)
+        self.niri.kalango_input_virtual = std::any::TypeId::of::<I>()
+            == std::any::TypeId::of::<crate::protocols::virtual_pointer::VirtualPointerInputBackend>();
+
         // KalangoOS: the person's own keyboard or mouse while an agent controls the screen
-        if std::any::TypeId::of::<I>()
-            != std::any::TypeId::of::<crate::protocols::virtual_pointer::VirtualPointerInputBackend>()
+        if !self.niri.kalango_input_virtual
             && matches!(
                 event,
                 InputEvent::Keyboard { .. }
@@ -183,6 +187,10 @@ impl State {
             self.kalango_person_input();
         }
 
+        // KalangoOS privacy mode: the person's own scroll, pen and gestures do nothing while the screen is covered
+        // (a pen or gesture that was already going on when the cover came ends by its End event, which is not held)
+        let covered = self.kalango_local_covered();
+
         let mut consumed_by_a11y = false;
         use InputEvent::*;
         match event {
@@ -192,18 +200,18 @@ impl State {
             PointerMotion { event } => self.on_pointer_motion::<I>(event),
             PointerMotionAbsolute { event } => self.on_pointer_motion_absolute::<I>(event),
             PointerButton { event } => self.on_pointer_button::<I>(event),
-            PointerAxis { event } => self.on_pointer_axis::<I>(event),
-            TabletToolAxis { event } => self.on_tablet_tool_axis::<I>(event),
-            TabletToolTip { event } => self.on_tablet_tool_tip::<I>(event),
-            TabletToolProximity { event } => self.on_tablet_tool_proximity::<I>(event),
-            TabletToolButton { event } => self.on_tablet_tool_button::<I>(event),
-            GestureSwipeBegin { event } => self.on_gesture_swipe_begin::<I>(event),
-            GestureSwipeUpdate { event } => self.on_gesture_swipe_update::<I>(event),
+            PointerAxis { event } => if !covered { self.on_pointer_axis::<I>(event) },
+            TabletToolAxis { event } => if !covered { self.on_tablet_tool_axis::<I>(event) },
+            TabletToolTip { event } => if !covered { self.on_tablet_tool_tip::<I>(event) },
+            TabletToolProximity { event } => if !covered { self.on_tablet_tool_proximity::<I>(event) },
+            TabletToolButton { event } => if !covered { self.on_tablet_tool_button::<I>(event) },
+            GestureSwipeBegin { event } => if !covered { self.on_gesture_swipe_begin::<I>(event) },
+            GestureSwipeUpdate { event } => if !covered { self.on_gesture_swipe_update::<I>(event) },
             GestureSwipeEnd { event } => self.on_gesture_swipe_end::<I>(event),
-            GesturePinchBegin { event } => self.on_gesture_pinch_begin::<I>(event),
-            GesturePinchUpdate { event } => self.on_gesture_pinch_update::<I>(event),
+            GesturePinchBegin { event } => if !covered { self.on_gesture_pinch_begin::<I>(event) },
+            GesturePinchUpdate { event } => if !covered { self.on_gesture_pinch_update::<I>(event) },
             GesturePinchEnd { event } => self.on_gesture_pinch_end::<I>(event),
-            GestureHoldBegin { event } => self.on_gesture_hold_begin::<I>(event),
+            GestureHoldBegin { event } => if !covered { self.on_gesture_hold_begin::<I>(event) },
             GestureHoldEnd { event } => self.on_gesture_hold_end::<I>(event),
             TouchDown { event } => self.on_touch_down::<I>(event),
             TouchMotion { event } => self.on_touch_motion::<I>(event),
@@ -570,6 +578,33 @@ impl State {
                     )
                 };
 
+                // KalangoOS privacy mode: the person's own keys reach no client (the screen is covered, they
+                // would type blind into the session being controlled), and the compositor's own binds, which act
+                // blind too (close-window, screenshots, focus…), do nothing; the way out stays: Esc Esc above, a VT
+                // switch, quit, suspend and monitors off (the power key), and the binds that spawn a program (the lock
+                // screen is one). A key held when the cover began gets its release in the hidden client; a key pressed
+                // under the cover has its release kept. (never on the lock screen, nor without the banner, nor after
+                // Esc Esc lifted it: `kalango_privacy_covering`)
+                if this.niri.kalango_privacy_covering() {
+                    match &res {
+                        FilterResult::Forward => {
+                            if pressed {
+                                this.niri.kalango_covered_keys.insert(key_code);
+                                return FilterResult::Intercept(None);
+                            }
+                            if this.niri.kalango_covered_keys.remove(&key_code) {
+                                return FilterResult::Intercept(None);
+                            }
+                        }
+                        FilterResult::Intercept(Some(bind)) if !kalango_cover_allows(&bind.action) => {
+                            return FilterResult::Intercept(None);
+                        }
+                        _ => {}
+                    }
+                } else if !this.niri.kalango_covered_keys.is_empty() {
+                    this.niri.kalango_covered_keys.clear();
+                }
+
                 if matches!(res, FilterResult::Forward) {
                     // If we didn't find any bind, try other hardcoded keys.
                     if this.niri.keyboard_focus.is_overview() && pressed {
@@ -690,6 +725,20 @@ impl State {
             .is_some_and(|t| now.duration_since(t) < Duration::from_millis(500));
         if twice && crate::remote_control::session_active() {
             self.niri.kalango_last_escape = None;
+            // Under the privacy cover the way out must not depend on the app (it may be hung, and `end-sessions` then
+            // waits for it forever): the compositor lifts the cover for this grant itself — the banner, the outline
+            // and the whole desktop are then visible and usable — and ends the session by stopping its core (it is
+            // this user's own process). The command still runs for the app to tidy up when it can.
+            if self.niri.kalango_privacy_covering() {
+                let (core, _) = self.niri.kalango_privacy_grant;
+                warn!("Esc Esc under the privacy cover: lifting it and stopping the remote core {core}");
+                self.niri.kalango_privacy_override = Some(self.niri.kalango_privacy_grant);
+                if core > 1 {
+                    // SAFETY: plain kill(2) to a pid of the grant (verified against its start time by the watch).
+                    unsafe { libc::kill(core, libc::SIGTERM) };
+                }
+                self.niri.queue_redraw_all();
+            }
             kalango_spawn("KALANGO_ESC_DUPLO");
         } else {
             self.niri.kalango_last_escape = Some(now);
@@ -716,6 +765,13 @@ impl State {
             self.niri.kalango_person_told = Some(now);
             kalango_spawn("KALANGO_PESSOA_ATIVA");
         }
+    }
+
+    /// KalangoOS privacy mode: the event in hand is the person's own (not the remote side's virtual pointer) and the
+    /// cover is on: what is behind it must get nothing from them, and what they can touch is only Kalango Remote's own
+    /// layers (see `Niri::contents_under`).
+    fn kalango_local_covered(&self) -> bool {
+        !self.niri.kalango_input_virtual && self.niri.kalango_privacy_covering()
     }
 
     /// Another key or a click with Mod: no tap, no hold.
@@ -2599,7 +2655,9 @@ impl State {
         //
         // FIXME: ideally this should use the pointer focus with up-to-date global location.
         let mut pointer_confined = None;
-        if let Some(under) = &self.niri.pointer_contents.surface {
+        // (under the privacy cover the focus is not the hidden app's: its constraint must not hold the person's pointer,
+        // nor get relative motion)
+        if let Some(under) = self.niri.pointer_contents.surface.as_ref().filter(|_| !self.kalango_local_covered()) {
             // No need to check if the pointer focus surface matches, because here we're checking
             // for an already-active constraint, and the constraint is deactivated when the focused
             // surface changes.
@@ -2921,6 +2979,33 @@ impl State {
     }
 
     fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
+        // KalangoOS privacy mode: the person's own click reaches only Kalango Remote's layers (the pointer's focus
+        // comes from `Niri::contents_under`, which offers nothing else), straight to the surface, past the screenshot
+        // UI, the Alt-Tab switcher and the rest. A press anywhere else does nothing; a release always goes through
+        // so a button held when the cover came is not left pressed.
+        if self.kalango_local_covered() {
+            let pointer = self.niri.seat.get_pointer().unwrap();
+            self.update_pointer_contents();
+            let state = event.state();
+            if state == ButtonState::Pressed && self.niri.pointer_contents.layer.is_none() {
+                return;
+            }
+            if state == ButtonState::Pressed {
+                let layer_under = self.niri.pointer_contents.layer.clone();
+                self.niri.focus_layer_surface_if_on_demand(layer_under);
+            }
+            pointer.button(
+                self,
+                &ButtonEvent {
+                    button: event.button_code(),
+                    state,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: event.time_msec(),
+                },
+            );
+            pointer.frame(self);
+            return;
+        }
         // KalangoOS: Mod with a click (moving a window) is not a tap
         self.kalango_mod_cancel();
         let pointer = self.niri.seat.get_pointer().unwrap();
@@ -4257,6 +4342,11 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
 
         let under = self.niri.contents_under(pos);
+
+        // (the cover is on: only a touch on one of Kalango Remote's layers goes on)
+        if self.kalango_local_covered() && under.layer.is_none() {
+            return;
+        }
 
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
@@ -5643,4 +5733,18 @@ fn kalango_spawn(var: &str) {
     if !args.is_empty() {
         crate::utils::spawning::spawn(args, None);
     }
+}
+
+/// KalangoOS privacy mode: the compositor binds that still work under the cover (the emergency ones; the rest would act
+/// blind): quit, a VT switch, suspend, monitors off, and the binds that spawn a program (KalangoOS's lock is one).
+fn kalango_cover_allows(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Quit(_)
+            | Action::ChangeVt(_)
+            | Action::Suspend
+            | Action::PowerOffMonitors
+            | Action::Spawn(_)
+            | Action::SpawnSh(_)
+    )
 }
