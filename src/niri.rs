@@ -364,6 +364,11 @@ pub struct Niri {
     /// session was last told (both throttle reading the allow file and spawning).
     pub kalango_person_checked: Option<std::time::Instant>,
     pub kalango_person_told: Option<std::time::Instant>,
+    /// KalangoOS: privacy mode (`remote_control::privacy_active`): the local monitors show a black cover and
+    /// nothing else but Kalango Remote's own layers; screen captures are not touched. Refreshed by a timer.
+    pub kalango_privacy: bool,
+    /// KalangoOS: the input event being processed came from the virtual pointer (the remote side).
+    pub kalango_input_virtual: bool,
     pub keyboard_focus: KeyboardFocus,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
@@ -519,6 +524,8 @@ pub struct OutputState {
     pub lock_render_state: LockRenderState,
     pub lock_surface: Option<LockSurface>,
     pub lock_color_buffer: SolidColorBuffer,
+    /// KalangoOS: the black cover of privacy mode.
+    pub kalango_cover_buffer: SolidColorBuffer,
     screen_transition: Option<ScreenTransition>,
     /// Damage tracker used for the debug damage visualization.
     pub debug_damage_tracker: OutputDamageTracker,
@@ -2643,6 +2650,8 @@ impl Niri {
             kalango_last_escape: None,
             kalango_person_checked: None,
             kalango_person_told: None,
+            kalango_privacy: false,
+            kalango_input_virtual: false,
             presentation_state,
             security_context_state,
             gamma_control_manager_state,
@@ -2963,6 +2972,7 @@ impl Niri {
             lock_render_state,
             lock_surface: None,
             lock_color_buffer: SolidColorBuffer::new(size, CLEAR_COLOR_LOCKED),
+            kalango_cover_buffer: SolidColorBuffer::new(size, [0., 0., 0., 1.]),
             screen_transition: None,
             debug_damage_tracker: OutputDamageTracker::from_output(&output),
         };
@@ -3086,6 +3096,7 @@ impl Niri {
             state.backdrop_buffer.resize(output_size);
 
             state.lock_color_buffer.resize(output_size);
+            state.kalango_cover_buffer.resize(output_size);
             if let Some(lock_surface) = &state.lock_surface {
                 configure_lock_surface(lock_surface, output);
             }
@@ -3746,6 +3757,26 @@ impl Niri {
     }
 
     /// Schedules an immediate redraw on all outputs if one is not already scheduled.
+    /// KalangoOS privacy mode: looks at the allow file four times a second (only with `KALANGO_NIRI_CONTROLE`) and
+    /// covers or uncovers the local monitors when the answer changes: an ended session or a dead core uncovers.
+    pub fn start_kalango_privacy_watch(&self) {
+        let every = Duration::from_millis(250);
+        let result = self
+            .event_loop
+            .insert_source(Timer::from_duration(every), move |_, _, state| {
+                let on = crate::remote_control::privacy_active();
+                if on != state.niri.kalango_privacy {
+                    info!("privacy mode: {}", if on { "on" } else { "off" });
+                    state.niri.kalango_privacy = on;
+                    state.niri.queue_redraw_all();
+                }
+                TimeoutAction::ToDuration(every)
+            });
+        if let Err(err) = result {
+            warn!("could not start the privacy mode watch: {err:?}");
+        }
+    }
+
     pub fn queue_redraw_all(&mut self) {
         for state in self.output_state.values_mut() {
             state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
@@ -4429,6 +4460,45 @@ impl Niri {
                 .into(),
             );
 
+            return;
+        }
+
+        // KalangoOS privacy mode: on the local monitors only Kalango Remote's own signals (the banner with the
+        // stop button, the outline) over a black cover; nothing else is drawn, so nothing leaks. Screen captures
+        // render with another target and still see the real desktop.
+        if ctx.target == RenderTarget::Output && self.kalango_privacy {
+            let layer_map = layer_map_for_output(output);
+            for layer in [Layer::Overlay, Layer::Top] {
+                for (mapped, geo) in self.layers_in_render_order(&layer_map, layer, false) {
+                    if !mapped.surface().namespace().starts_with("kalango-remote-") {
+                        continue;
+                    }
+                    let loc = geo.loc.to_f64();
+                    mapped.render_popups(
+                        ctx.r(),
+                        None,
+                        loc,
+                        XrayPos::default().offset(loc),
+                        &mut |elem| push(elem.into()),
+                    );
+                    mapped.render_normal(
+                        ctx.r(),
+                        None,
+                        loc,
+                        XrayPos::default().offset(loc),
+                        &mut |elem| push(elem.into()),
+                    );
+                }
+            }
+            push(
+                SolidColorRenderElement::from_buffer(
+                    &state.kalango_cover_buffer,
+                    (0., 0.),
+                    1.,
+                    Kind::Unspecified,
+                )
+                .into(),
+            );
             return;
         }
 

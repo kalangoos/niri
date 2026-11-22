@@ -167,9 +167,13 @@ impl State {
         let hide_exit_confirm_dialog =
             self.niri.exit_confirm_dialog.is_open() && should_hide_exit_confirm_dialog(&event);
 
+        // KalangoOS: whether this event came from the virtual pointer (the remote side) and not from this computer's
+        // own devices (privacy mode never blocks the former)
+        self.niri.kalango_input_virtual = std::any::TypeId::of::<I>()
+            == std::any::TypeId::of::<crate::protocols::virtual_pointer::VirtualPointerInputBackend>();
+
         // KalangoOS: the person's own keyboard or mouse while an agent controls the screen
-        if std::any::TypeId::of::<I>()
-            != std::any::TypeId::of::<crate::protocols::virtual_pointer::VirtualPointerInputBackend>()
+        if !self.niri.kalango_input_virtual
             && matches!(
                 event,
                 InputEvent::Keyboard { .. }
@@ -570,6 +574,13 @@ impl State {
                     )
                 };
 
+                // KalangoOS privacy mode: the person's own keys reach no client (the screen is covered, they
+                // would type blind into the session being controlled); binds (power key, lock, VT switch) and
+                // Esc Esc above still work.
+                if this.niri.kalango_privacy && matches!(res, FilterResult::Forward) {
+                    return FilterResult::Intercept(None);
+                }
+
                 if matches!(res, FilterResult::Forward) {
                     // If we didn't find any bind, try other hardcoded keys.
                     if this.niri.keyboard_focus.is_overview() && pressed {
@@ -716,6 +727,18 @@ impl State {
             self.niri.kalango_person_told = Some(now);
             kalango_spawn("KALANGO_PESSOA_ATIVA");
         }
+    }
+
+    /// KalangoOS privacy mode: the person's own click, scroll or touch goes nowhere (the screen is covered), unless
+    /// it is on one of Kalango Remote's own layers (the banner with the stop button). The remote side's pointer
+    /// (the virtual pointer backend) is never blocked.
+    fn kalango_privacy_blocks(
+        &self,
+        layer: Option<&smithay::desktop::LayerSurface>,
+    ) -> bool {
+        self.niri.kalango_privacy
+            && !self.niri.kalango_input_virtual
+            && !layer.is_some_and(|l| l.namespace().starts_with("kalango-remote-"))
     }
 
     /// Another key or a click with Mod: no tap, no hold.
@@ -2921,6 +2944,9 @@ impl State {
     }
 
     fn on_pointer_button<I: InputBackend>(&mut self, event: I::PointerButtonEvent) {
+        if self.kalango_privacy_blocks(self.niri.pointer_contents.layer.as_ref()) {
+            return;
+        }
         // KalangoOS: Mod with a click (moving a window) is not a tap
         self.kalango_mod_cancel();
         let pointer = self.niri.seat.get_pointer().unwrap();
@@ -3245,6 +3271,9 @@ impl State {
     }
 
     fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {
+        if self.kalango_privacy_blocks(self.niri.pointer_contents.layer.as_ref()) {
+            return;
+        }
         let pointer = &self.niri.seat.get_pointer().unwrap();
 
         let source = event.source();
@@ -4257,6 +4286,10 @@ impl State {
         let serial = SERIAL_COUNTER.next_serial();
 
         let under = self.niri.contents_under(pos);
+
+        if self.kalango_privacy_blocks(under.layer.as_ref()) {
+            return;
+        }
 
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 

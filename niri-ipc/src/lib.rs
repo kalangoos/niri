@@ -67,6 +67,8 @@ pub mod state;
 pub enum Request {
     /// Request the version string for the running niri instance.
     Version,
+    /// KalangoOS: request the list of what this compositor adds to upstream niri (`privacy`, `remote-control`).
+    KalangoFeatures,
     /// Request information about connected outputs.
     Outputs,
     /// Request information about workspaces.
@@ -139,6 +141,8 @@ pub enum Response {
     Handled,
     /// The version string for the running niri instance.
     Version(String),
+    /// KalangoOS: what this compositor adds to upstream niri.
+    KalangoFeatures(Vec<String>),
     /// Information about connected outputs.
     ///
     /// Map from output name to output info.

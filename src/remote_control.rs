@@ -59,6 +59,18 @@ fn start_time(pid: i32) -> Option<u64> {
     stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
 }
 
+/// The allow file's text, only when the file is one kalangod (root, or the development owner) wrote and nobody
+/// else can write: a file anyone else could have written is no permission.
+fn trusted_text(path: &std::ffi::OsStr) -> Option<String> {
+    let owner: u32 = std::env::var("KALANGO_NIRI_CONTROLE_DONO").ok().and_then(|u| u.parse().ok()).unwrap_or(0);
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.uid() != owner || meta.mode() & 0o022 != 0 {
+        warn!("remote control: {:?} is not owned by uid {owner} or is writable by others; denying", path);
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// Whether `client` may see the global of `cap`.
 pub fn allowed(dh: &DisplayHandle, client: &Client, cap: Capability) -> bool {
     let Some(path) = std::env::var_os("KALANGO_NIRI_CONTROLE") else {
@@ -67,16 +79,7 @@ pub fn allowed(dh: &DisplayHandle, client: &Client, cap: Capability) -> bool {
     let Ok(cred) = client.get_credentials(dh) else {
         return false;
     };
-    let owner: u32 = std::env::var("KALANGO_NIRI_CONTROLE_DONO").ok().and_then(|u| u.parse().ok()).unwrap_or(0);
-    let Ok(meta) = std::fs::metadata(&path) else {
-        return false;
-    };
-    // a file anyone else could have written is no permission
-    if meta.uid() != owner || meta.mode() & 0o022 != 0 {
-        warn!("remote control: {:?} is not owned by uid {owner} or is writable by others; denying", path);
-        return false;
-    }
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Some(text) = trusted_text(&path) else {
         return false;
     };
     let p = Process {
@@ -119,6 +122,42 @@ pub fn agent_session_active() -> bool {
         .is_some_and(|text| agent_in_session(&text))
 }
 
+/// Privacy mode: a grant by pid with the word `privacidade` among its capabilities (Kalango Remote asks for it only
+/// for a session nobody on this computer approved), whose process is still the one that was granted (`alive` says
+/// whether pid and start time still name a running process). The local monitors then show a black cover while
+/// the screen captures (wlr-screencopy, screencasts) keep showing the real desktop. When the core dies, or kalangod
+/// takes the grant away, the cover goes.
+pub fn privacy_wanted(text: &str, alive: impl Fn(i32, u64) -> bool) -> bool {
+    text.lines().any(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        match f.as_slice() {
+            ["pid", pid, start, caps] if caps.split(',').any(|c| c == "privacidade") => {
+                matches!((pid.parse(), start.parse()), (Ok(p), Ok(s)) if alive(p, s))
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Whether privacy mode is wanted now (see `privacy_wanted`), read from the trusted allow file.
+pub fn privacy_active() -> bool {
+    std::env::var_os("KALANGO_NIRI_CONTROLE")
+        .and_then(|path| trusted_text(&path))
+        .is_some_and(|text| privacy_wanted(&text, |pid, start| start_time(pid) == Some(start)))
+}
+
+/// What this compositor can do beyond upstream niri, for `niri msg kalango-features` (Kalango Remote enables its
+/// privacy switch only when the list has `privacy`). Capabilities that need the allow file are listed only when
+/// the session set `KALANGO_NIRI_CONTROLE`.
+pub fn features() -> Vec<String> {
+    let mut v = Vec::new();
+    if std::env::var_os("KALANGO_NIRI_CONTROLE").is_some() {
+        v.push(String::from("remote-control"));
+        v.push(String::from("privacy"));
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +191,16 @@ mod tests {
         assert!(!agent_in_session("pid 4242 987654 captura,ponteiro,teclado\n"), "Kalango Remote's");
         assert!(agent_in_session("exe /usr/bin/kalango-shell teclado\npid 7 9 captura,ponteiro,teclado,agente\n"));
         assert!(!agent_in_session("exe /usr/bin/x captura,agente\n"), "only a grant to one process");
+    }
+
+    #[test]
+    fn privacy_needs_the_word_and_the_same_process() {
+        let alive = |pid: i32, start: u64| pid == 4242 && start == 987654;
+        assert!(privacy_wanted("pid 4242 987654 captura,ponteiro,teclado,privacidade\n", alive));
+        assert!(!privacy_wanted("pid 4242 987654 captura,ponteiro,teclado\n", alive), "no word, no cover");
+        assert!(!privacy_wanted("pid 4242 1 captura,privacidade\n", alive), "a reused pid is another process");
+        assert!(!privacy_wanted("pid 77 987654 privacidade\n", alive), "the core died");
+        assert!(!privacy_wanted("exe /usr/bin/x captura,privacidade\n", alive), "only a grant to one process");
+        assert!(!privacy_wanted("", alive));
     }
 }

@@ -13,6 +13,8 @@ upstream; o ramo **`kalangoos`** é o niri v26.04 (`8ed0da4`) com um commit por 
 | encaixe nas bordas opcional | Ação `SetEdgeSnap { on }` |
 | minimizar | `xdg set_minimized`, ação `minimize-window`, IPC `is_minimized` |
 | lupa | Ação `SetZoom { factor, mode }`: lente, tela inteira ou metade, fora do bloqueio e das capturas |
+| controle remoto, Esc Esc, agente na tela | Permissões por processo para captura e entrada, Esc Esc encerra a sessão, a pessoa retoma a tela do agente |
+| modo privacidade | Cobertura preta só no monitor local durante uma sessão remota sem supervisão; as capturas veem a área de trabalho; `niri msg kalango-features` |
 | renderizador por software | Sem aceleração na GPU principal (VirtualBox ou VMware sem 3D), aceita o llvmpipe nela em vez de ficar sem tela |
 
 Os mesmos patches estão em `sessao/niri/` no repositório do KalangoOS, aplicados por `sessao/niri/preparar.sh`.

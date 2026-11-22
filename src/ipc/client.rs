@@ -31,6 +31,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
 
     let request = match &msg {
         Msg::Version => Request::Version,
+        Msg::KalangoFeatures => Request::KalangoFeatures,
         Msg::Outputs => Request::Outputs,
         Msg::FocusedWindow => Request::FocusedWindow,
         Msg::FocusedOutput => Request::FocusedOutput,
@@ -113,6 +114,18 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
     match msg {
         Msg::RequestError => {
             bail!("unexpected response: expected an error, got {response:?}");
+        }
+        Msg::KalangoFeatures => {
+            let Response::KalangoFeatures(features) = response else {
+                bail!("unexpected response: expected KalangoFeatures, got {response:?}");
+            };
+            if json {
+                println!("{}", json!(features));
+            } else {
+                for f in features {
+                    println!("{f}");
+                }
+            }
         }
         Msg::Version => {
             let Response::Version(compositor_version) = response else {

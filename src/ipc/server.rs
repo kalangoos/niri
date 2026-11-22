@@ -272,6 +272,7 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
     let response = match request {
         Request::ReturnError => return Err(String::from("example compositor error")),
         Request::Version => Response::Version(version()),
+        Request::KalangoFeatures => Response::KalangoFeatures(crate::remote_control::features()),
         Request::Outputs => {
             let ipc_outputs = ctx.ipc_outputs.lock().unwrap().clone();
             let outputs = ipc_outputs.values().cloned().map(|o| (o.name.clone(), o));
