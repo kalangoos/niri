@@ -123,27 +123,83 @@ pub fn agent_session_active() -> bool {
 }
 
 /// Privacy mode: a grant by pid with the word `privacidade` among its capabilities (Kalango Remote asks for it only
-/// for a session nobody on this computer approved), whose process is still the one that was granted (`alive` says
-/// whether pid and start time still name a running process). The local monitors then show a black cover while
-/// the screen captures (wlr-screencopy, screencasts) keep showing the real desktop. When the core dies, or kalangod
-/// takes the grant away, the cover goes.
-pub fn privacy_wanted(text: &str, alive: impl Fn(i32, u64) -> bool) -> bool {
-    text.lines().any(|line| {
+/// for a session nobody on this computer approved), whose process is still the one that was granted and whose parent
+/// is still Kalango Remote's app. `lookup(pid, start)` says that: the app's pid (the parent of the granted core) or
+/// None. The local monitors then show a black cover while the screen captures (wlr-screencopy, screencasts) keep
+/// showing the real desktop.
+///
+/// What fails open (the person is never locked out, the cover goes away): the allow file unreadable, not the
+/// kalangod's (owner, or writable by others), without the word, with a malformed line; the core dead or its pid reused;
+/// the app (its parent) dead; no mapped `kalango-remote-banner` layer owned by that app on any output (see
+/// `Niri::kalango_privacy_covering`); the session locked. What fails closed: nothing but a live grant with a live app
+/// and a live banner. Warnings are logged for the unreadable and malformed cases.
+pub fn privacy_grant(text: &str, lookup: impl Fn(i32, u64) -> Option<i32>) -> Option<i32> {
+    text.lines().find_map(|line| {
         let f: Vec<&str> = line.split_whitespace().collect();
         match f.as_slice() {
             ["pid", pid, start, caps] if caps.split(',').any(|c| c == "privacidade") => {
-                matches!((pid.parse(), start.parse()), (Ok(p), Ok(s)) if alive(p, s))
+                match (pid.parse(), start.parse()) {
+                    (Ok(p), Ok(s)) => lookup(p, s),
+                    _ => None,
+                }
             }
-            _ => false,
+            _ => None,
         }
     })
 }
 
-/// Whether privacy mode is wanted now (see `privacy_wanted`), read from the trusted allow file.
-pub fn privacy_active() -> bool {
-    std::env::var_os("KALANGO_NIRI_CONTROLE")
-        .and_then(|path| trusted_text(&path))
-        .is_some_and(|text| privacy_wanted(&text, |pid, start| start_time(pid) == Some(start)))
+/// Lines of the allow file that start like a grant by pid but cannot be read (they would grant nothing).
+pub fn malformed_grants(text: &str) -> usize {
+    text.lines()
+        .filter(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            f.first() == Some(&"pid")
+                && !matches!(f.as_slice(), ["pid", pid, start, _] if pid.parse::<i32>().is_ok() && start.parse::<u64>().is_ok())
+        })
+        .count()
+}
+
+/// The app that owns the granted core: the parent of process `pid` (started at `start`), provided it is the
+/// `kalango-remote` next to the core's own executable. The pid of that app is what the layers of Kalango Remote must
+/// belong to.
+pub fn core_app_pid(pid: i32, start: u64) -> Option<i32> {
+    if start_time(pid) != Some(start) {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let ppid: i32 = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+    if ppid <= 1 {
+        return None;
+    }
+    let core = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let app = std::fs::read_link(format!("/proc/{ppid}/exe")).ok()?;
+    (app == core.with_file_name("kalango-remote")).then_some(ppid)
+}
+
+/// What the allow file says about privacy mode now.
+pub enum Privacy {
+    /// Not wanted (no file, no variable, no grant with the word, a dead core or app).
+    Off,
+    /// Wanted; the layers of this app pid are the ones to trust.
+    On(i32),
+    /// The file is there but cannot be trusted or read.
+    Unreadable,
+}
+
+pub fn privacy_state() -> Privacy {
+    let Some(path) = std::env::var_os("KALANGO_NIRI_CONTROLE") else {
+        return Privacy::Off;
+    };
+    if !std::path::Path::new(&path).exists() {
+        return Privacy::Off;
+    }
+    let Some(text) = trusted_text(&path) else {
+        return Privacy::Unreadable;
+    };
+    match privacy_grant(&text, core_app_pid) {
+        Some(app) => Privacy::On(app),
+        None => Privacy::Off,
+    }
 }
 
 /// What this compositor can do beyond upstream niri, for `niri msg kalango-features` (Kalango Remote enables its
@@ -194,13 +250,20 @@ mod tests {
     }
 
     #[test]
-    fn privacy_needs_the_word_and_the_same_process() {
-        let alive = |pid: i32, start: u64| pid == 4242 && start == 987654;
-        assert!(privacy_wanted("pid 4242 987654 captura,ponteiro,teclado,privacidade\n", alive));
-        assert!(!privacy_wanted("pid 4242 987654 captura,ponteiro,teclado\n", alive), "no word, no cover");
-        assert!(!privacy_wanted("pid 4242 1 captura,privacidade\n", alive), "a reused pid is another process");
-        assert!(!privacy_wanted("pid 77 987654 privacidade\n", alive), "the core died");
-        assert!(!privacy_wanted("exe /usr/bin/x captura,privacidade\n", alive), "only a grant to one process");
-        assert!(!privacy_wanted("", alive));
+    fn privacy_needs_the_word_the_same_process_and_its_app() {
+        let lookup = |pid: i32, start: u64| (pid == 4242 && start == 987654).then_some(555);
+        assert_eq!(privacy_grant("pid 4242 987654 captura,ponteiro,teclado,privacidade\n", lookup), Some(555));
+        assert_eq!(privacy_grant("pid 4242 987654 captura,ponteiro,teclado\n", lookup), None, "no word, no cover");
+        assert_eq!(privacy_grant("pid 4242 1 captura,privacidade\n", lookup), None, "a reused pid is another process");
+        assert_eq!(privacy_grant("pid 77 987654 privacidade\n", lookup), None, "the core died");
+        assert_eq!(privacy_grant("exe /usr/bin/x captura,privacidade\n", lookup), None, "only a grant to one process");
+        assert_eq!(privacy_grant("", lookup), None);
+        // the app died (the lookup finds no app): the cover goes even though the core lives
+        assert_eq!(privacy_grant("pid 4242 987654 privacidade\n", |_, _| None), None);
+    }
+
+    #[test]
+    fn grants_that_cannot_be_read_are_counted() {
+        assert_eq!(malformed_grants("pid 1 2 captura\npid x 2 captura\npid 1 captura\nexe /x captura\npid 3 4 a,b"), 2);
     }
 }
